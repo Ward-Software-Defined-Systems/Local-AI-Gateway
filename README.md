@@ -4,6 +4,8 @@ A monitoring, inspection and data-loss-prevention reverse proxy for local LLM se
 
 It replaces the two terminal monitors it grew out of, [LMS-Monitor](https://github.com/Ward-Software-Defined-Systems/LMS-Monitor) and [Ollama-Monitor](https://github.com/Ward-Software-Defined-Systems/Ollama-Monitor).
 
+![The Overview tab: live request feed, rolling metrics, hypothetical cost, hardware line and the model list of both backends](assets/overview.png)
+
 ## Features
 
 - **Reverse proxy for both backends.** One listener per backend, byte-transparent: clients see exactly what LM Studio or Ollama sent. Streams are teed, never buffered. WebSocket clients (the LM Studio SDK) are tunnelled.
@@ -66,6 +68,16 @@ The `lms` CLI talks to LM Studio's internal port and is unaffected.
 | Settings | runtime facts and paths, the `config.toml` editor (check, save and apply, reload), maintenance |
 
 The status bar shows backend reachability and versions, the live-socket state, unacknowledged alerts, cloud requests in the last 24 hours and the lifetime totals. The feed can be paused (`PAUSED`) and the session metrics reset, as in the terminal monitors.
+
+![The LM Studio tab: the feed, rolling metrics, hardware line and model list of one backend, with the time-range charts below](assets/lm-studio.png)
+
+![The Ollama tab: the same for Ollama, with cloud models marked and the size and expiry of loaded models](assets/ollama.png)
+
+![The Requests tab: filters, full-text search and the request history with tokens, timing, size and finding counts](assets/requests.png)
+
+![The Security tab: 24-hour summary, alert centre, findings with masked previews, the test box and the rules and policy matrix](assets/security.png)
+
+![The Settings tab: runtime facts and paths, the config.toml editor with check, save-and-apply and reload, and the maintenance actions](assets/settings.png)
 
 ## Configuration
 

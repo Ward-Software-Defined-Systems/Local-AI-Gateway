@@ -81,11 +81,12 @@ export function truncate(s: string, max = 28): string {
   return s.length <= max ? s : `${s.slice(0, max - 1)}…`
 }
 
-/** `in 4m`, `in 2h 10m`, or `expired` for a future timestamp. */
+/** `in 4m`, `in 2h 10m`, `expired`, or `never` for the far-future expiry Ollama reports for keep_alive -1. */
 export function formatCountdown(iso: string | null, now: Date): string {
   if (!iso) return '-'
   const diff = Math.round((new Date(iso).getTime() - now.getTime()) / 1000)
   if (diff <= 0) return 'expired'
+  if (diff > 365 * 86_400) return 'never'
   if (diff < 60) return `in ${diff}s`
   if (diff < 3600) return `in ${Math.round(diff / 60)}m`
   const h = Math.floor(diff / 3600)
