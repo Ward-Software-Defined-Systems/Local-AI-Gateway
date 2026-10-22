@@ -106,6 +106,22 @@ mod tests {
     use crate::parsers::parse_all;
 
     #[test]
+    fn fixture_lmstudio_embeddings_report_the_model_and_prompt_tokens() {
+        const V1: &[u8] = include_bytes!("../../../../fixtures/lmstudio/v1-embeddings.json");
+        const V0: &[u8] = include_bytes!("../../../../fixtures/lmstudio/api-v0-embeddings.json");
+        for body in [V1, V0] {
+            let parsed =
+                parse_all(Box::new(EmbeddingsParser::new(Flavor::OpenAi)), body, 4096).unwrap();
+            assert_eq!(
+                parsed.model.as_deref(),
+                Some("text-embedding-nomic-embed-text-v1.5")
+            );
+            // LM Studio 0.4.25 reports zero prompt tokens for embeddings; the count is kept as sent.
+            assert_eq!(parsed.prompt_tokens, Some(0), "{parsed:?}");
+        }
+    }
+
+    #[test]
     fn openai_and_ollama_embedding_bodies_report_prompt_tokens() {
         let openai = br#"{"object":"list","data":[{"object":"embedding","embedding":[0.1,0.2],"index":0}],"model":"text-embedding-nomic-embed-text-v1.5","usage":{"prompt_tokens":4,"total_tokens":4}}"#;
         let parsed =

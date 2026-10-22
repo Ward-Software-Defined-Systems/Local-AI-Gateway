@@ -1,0 +1,6 @@
+{"model":"gemma4:12b-mlx","created_at":"2026-10-22T20:47:35.83786Z","response":"","thinking":"The","done":false}
+{"model":"gemma4:12b-mlx","created_at":"2026-10-22T20:47:35.862188Z","response":"","thinking":" user","done":false}
+{"model":"gemma4:12b-mlx","created_at":"2026-10-22T20:47:35.862193Z","response":"","thinking":" said","done":false}
+{"model":"gemma4:12b-mlx","created_at":"2026-10-22T20:47:35.862215Z","response":"","thinking":" \"","done":false}
+{"model":"gemma4:12b-mlx","created_at":"2026-10-22T20:47:35.896041Z","response":"","thinking":"Say","done":false}
+{"model":"gemma4:12b-mlx","created_at":"2026-10-22T20:47:35.896047Z","response":"","done":true,"done_reason":"length","context":[2,105,9731,107,98,107,106,107,105,2364,107,37889,5631,106,107,105,4368,107,100,45518,107,818,2430,1176,623,37889],"total_duration":121692042,"load_duration":615333,"prompt_eval_count":18,"prompt_eval_cached_count":17,"prompt_eval_duration":4250,"eval_count":8,"eval_duration":120190167}

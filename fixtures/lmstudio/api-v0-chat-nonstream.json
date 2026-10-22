@@ -1,0 +1,46 @@
+{
+  "id": "chatcmpl-zv5ck562j95isde9i590n",
+  "object": "chat.completion",
+  "created": 1792702012,
+  "model": "qwen/qwen3.6-27b",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "Here's a thinking process:\n\n",
+        "tool_calls": []
+      },
+      "logprobs": null,
+      "finish_reason": "length"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 12,
+    "completion_tokens": 7,
+    "total_tokens": 19,
+    "completion_tokens_details": {
+      "reasoning_tokens": 7
+    }
+  },
+  "stats": {
+    "tokens_per_second": 19.444444444444446,
+    "time_to_first_token": 0.211,
+    "generation_time": 0.36,
+    "stop_reason": "maxPredictedTokensReached"
+  },
+  "model_info": {
+    "arch": "qwen3_5",
+    "quant": "8bit",
+    "format": "mlx",
+    "context_length": 262144
+  },
+  "runtime": {
+    "name": "mlx-llm-mac-arm64-apple-metal-advsimd",
+    "version": "1.13.1",
+    "supported_formats": [
+      "safetensors"
+    ]
+  }
+}

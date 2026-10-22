@@ -1,0 +1,19 @@
+{
+  "id": "msg_v337x37zjtj99f09eki91g",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "Hi!"
+    }
+  ],
+  "model": "qwen/qwen3.6-27b",
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 14,
+    "output_tokens": 3,
+    "cache_read_input_tokens": 0
+  }
+}

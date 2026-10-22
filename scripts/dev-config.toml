@@ -1,11 +1,11 @@
-# Scratch configuration for `make dev-backend`: never binds the backends' own ports (31337, 11434).
+# Scratch configuration for `make dev-backend`: never binds the backends' own ports (1234, 11434).
 [dashboard]
 listen = "127.0.0.1:8788"
 tls = "off"
 
 [backends.lmstudio]
 listen = ["127.0.0.1:41337"]
-upstream = "http://127.0.0.1:31337"
+upstream = "http://127.0.0.1:1234"
 
 [backends.ollama]
 listen = ["127.0.0.1:41434"]

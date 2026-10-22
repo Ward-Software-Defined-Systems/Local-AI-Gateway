@@ -109,7 +109,8 @@ pub fn request_model(obj: &Map<String, Value>) -> Option<String> {
         .then(|| model.to_string())
 }
 
-/// For streaming `/v1/chat/completions` and `/v1/completions` requests, sets `stream_options.include_usage =
+/// For streaming `/v1/chat/completions`, `/v1/completions` and LM Studio `/api/v0/chat/completions`
+/// requests, sets `stream_options.include_usage =
 /// true` so the final SSE frame carries token counts. Without it Ollama omits usage entirely, and that is
 /// the default in most clients. The extra frame has `choices: []`, which clients ignore. Returns the body
 /// unchanged when it is not a streaming JSON object; key order is not preserved on a rewrite.

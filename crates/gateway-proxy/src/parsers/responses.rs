@@ -3,8 +3,9 @@
 //! `response.output_text.delta` carries text; `response.output_item.done` ends an item;
 //! `response.completed` (or `response.incomplete`) carries `response.usage.input_tokens/output_tokens`
 //! and `response.status`; `error` and `response.failed` carry refusals. Non-streaming is the response
-//! object itself. Shapes follow the public API; both backends' real streams are to be captured as
-//! fixtures (Phase 1) to confirm them.
+//! object itself. Both backends serve it (fixtures under `fixtures/lmstudio` and `fixtures/ollama`);
+//! reasoning arrives as `response.reasoning_text.delta` (LM Studio) or
+//! `response.reasoning_summary_text.delta` (Ollama) and counts as reply text here.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -57,6 +58,8 @@ struct OutputItem {
     #[serde(rename = "type")]
     kind: Option<String>,
     content: Option<Vec<ContentPart>>,
+    /// Reasoning items: Ollama puts the text under `summary`, LM Studio under `content`.
+    summary: Option<Vec<ContentPart>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -129,13 +132,21 @@ impl ResponsesParser {
         }
         if final_object && self.text.is_empty() {
             for item in output.unwrap_or_default() {
-                if item.kind.as_deref() == Some("message") {
-                    for part in item.content.unwrap_or_default() {
-                        if part.kind.as_deref() == Some("output_text")
-                            && let Some(text) = &part.text
-                        {
-                            self.text.push(text);
-                        }
+                let wanted: &[&str] = match item.kind.as_deref() {
+                    Some("message") => &["output_text"],
+                    Some("reasoning") => &["reasoning_text", "summary_text"],
+                    _ => &[],
+                };
+                let parts = item
+                    .content
+                    .unwrap_or_default()
+                    .into_iter()
+                    .chain(item.summary.unwrap_or_default());
+                for part in parts {
+                    if part.kind.as_deref().is_some_and(|k| wanted.contains(&k))
+                        && let Some(text) = &part.text
+                    {
+                        self.text.push(text);
                     }
                 }
             }
@@ -164,7 +175,9 @@ impl ResponsesParser {
             .unwrap_or("")
             .to_string();
         match kind.as_str() {
-            "response.output_text.delta" => {
+            "response.output_text.delta"
+            | "response.reasoning_text.delta"
+            | "response.reasoning_summary_text.delta" => {
                 if let Some(delta) = &event.delta {
                     self.text.push(delta);
                 }
@@ -356,5 +369,49 @@ mod tests {
         let parsed = parse_all(Box::new(ResponsesParser::new(true)), error, 64).unwrap();
         assert_eq!(parsed.in_stream_error.as_deref(), Some("model not found"));
         assert!(parse_all(Box::new(ResponsesParser::new(true)), b"", 64).is_none());
+    }
+
+    const LMS_STREAM: &[u8] = include_bytes!("../../../../fixtures/lmstudio/v1-responses-sse.txt");
+    const LMS_SINGLE: &[u8] =
+        include_bytes!("../../../../fixtures/lmstudio/v1-responses-nonstream.json");
+    const OLLAMA_STREAM: &[u8] = include_bytes!("../../../../fixtures/ollama/v1-responses-sse.txt");
+    const OLLAMA_SINGLE: &[u8] =
+        include_bytes!("../../../../fixtures/ollama/v1-responses-nonstream.json");
+    const LMS_REASONING: &str = "Here's a thinking process:\n\n1.  **Analyze User Input";
+    const OLLAMA_REASONING: &str = "The user said \"Say hi\".\nThe user wants a friendly";
+
+    #[test]
+    fn fixture_lmstudio_responses_reasoning_only_reply() {
+        for chunk in [9, 90, 8192] {
+            let s = parse_all(Box::new(ResponsesParser::new(true)), LMS_STREAM, chunk).unwrap();
+            assert_eq!(s.model.as_deref(), Some("qwen/qwen3.6-27b"));
+            assert_eq!((s.prompt_tokens, s.gen_tokens), (Some(12), Some(15)));
+            assert!(!s.tokens_estimated);
+            assert_eq!(s.stop_reason.as_deref(), Some("completed"));
+            assert_eq!(s.text, LMS_REASONING, "reasoning deltas are reply text");
+        }
+        let single = parse_all(Box::new(ResponsesParser::new(false)), LMS_SINGLE, 64).unwrap();
+        assert_eq!(
+            (single.prompt_tokens, single.gen_tokens),
+            (Some(12), Some(15))
+        );
+        assert_eq!(single.stop_reason.as_deref(), Some("completed"));
+        assert_eq!(single.text, LMS_REASONING);
+    }
+
+    #[test]
+    fn fixture_ollama_responses_summary_reasoning() {
+        let s = parse_all(Box::new(ResponsesParser::new(true)), OLLAMA_STREAM, 90).unwrap();
+        assert_eq!(s.model.as_deref(), Some("gemma4:12b-mlx"));
+        assert_eq!((s.prompt_tokens, s.gen_tokens), (Some(18), Some(16)));
+        assert!(!s.tokens_estimated);
+        assert_eq!(s.stop_reason.as_deref(), Some("completed"));
+        assert_eq!(s.text, OLLAMA_REASONING);
+        let single = parse_all(Box::new(ResponsesParser::new(false)), OLLAMA_SINGLE, 64).unwrap();
+        assert_eq!(
+            (single.prompt_tokens, single.gen_tokens),
+            (Some(18), Some(16))
+        );
+        assert_eq!(single.text, OLLAMA_REASONING);
     }
 }

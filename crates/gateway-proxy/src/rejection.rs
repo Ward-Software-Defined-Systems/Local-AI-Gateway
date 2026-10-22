@@ -109,6 +109,25 @@ pub fn truncate(s: &str, max: usize) -> &str {
 mod tests {
     use super::*;
 
+    #[test]
+    fn fixture_ollama_error_bodies_summarise_to_their_message() {
+        let native = include_bytes!("../../../fixtures/ollama/api-embed-400-unsupported.json");
+        assert_eq!(
+            error_summary(native).as_deref(),
+            Some("input after truncation exceeds maximum context length")
+        );
+        let legacy = include_bytes!("../../../fixtures/ollama/api-embeddings-500-unsupported.json");
+        assert_eq!(
+            error_summary(legacy).as_deref(),
+            Some("this model does not support embeddings")
+        );
+        let openai = include_bytes!("../../../fixtures/ollama/v1-embeddings-400-unsupported.json");
+        assert_eq!(
+            error_summary(openai).as_deref(),
+            Some("input after truncation exceeds maximum context length")
+        );
+    }
+
     const MLX: &str = "Input does not fit in context length. The input has 359277 tokens, but the context length only supports 262144 tokens.";
     const LLAMA: &str = "request (94920 tokens) exceeds the available context size (8192 tokens), try increasing it";
 

@@ -1,0 +1,18 @@
+data: {"id":"chatcmpl-h6g37nzwq6lrmd6q5bnaq","object":"chat.completion.chunk","created":1792702011,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Here"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-h6g37nzwq6lrmd6q5bnaq","object":"chat.completion.chunk","created":1792702011,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[{"index":0,"delta":{"reasoning_content":"'s"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-h6g37nzwq6lrmd6q5bnaq","object":"chat.completion.chunk","created":1792702011,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[{"index":0,"delta":{"reasoning_content":" a"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-h6g37nzwq6lrmd6q5bnaq","object":"chat.completion.chunk","created":1792702011,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[{"index":0,"delta":{"reasoning_content":" thinking"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-h6g37nzwq6lrmd6q5bnaq","object":"chat.completion.chunk","created":1792702011,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[{"index":0,"delta":{"reasoning_content":" process"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-h6g37nzwq6lrmd6q5bnaq","object":"chat.completion.chunk","created":1792702011,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[{"index":0,"delta":{"reasoning_content":":"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-h6g37nzwq6lrmd6q5bnaq","object":"chat.completion.chunk","created":1792702011,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[{"index":0,"delta":{"reasoning_content":"\n\n"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-h6g37nzwq6lrmd6q5bnaq","object":"chat.completion.chunk","created":1792702011,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"length"}]}
+
+data: [DONE]
+

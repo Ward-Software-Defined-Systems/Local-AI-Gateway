@@ -130,12 +130,23 @@ configuration, engine and pricing through `Hot`, so a reload is visible to the n
 - Tests need no terminal, sudo, GPU, LM Studio or Ollama; anything that touches the machine is `#[ignore]`.
 - A reload either applies whole or changes nothing.
 
+## Fixtures
+
+`fixtures/` holds real captures, never hand-edited: LM Studio 0.4.25 (MLX engine, `qwen/qwen3.6-27b`) and
+Ollama 0.40.6 (`gemma4:12b-mlx`) answering every inference format with a tiny `max_tokens`, plus model lists,
+an `ioreg` dump and three Ollama error bodies. What they settled: LM Studio sends a usage frame on
+`/v1/chat/completions` and `/api/v0/chat/completions` streams only when `stream_options.include_usage` is set
+(hence `rewrite_include_usage`, which now covers `LmStudioNative` too), puts `usage` on the last frame of
+completion streams unasked, carries engine `stats` only on non-streaming `/api/v0` objects, and reports zero
+prompt tokens for embeddings. Ollama splits an Anthropic prompt between `input_tokens` and
+`cache_read_input_tokens` (the parser sums them), streams thinking as `thinking_delta` / `thinking` /
+`response.reasoning_summary_text.delta`, and sends no usage on `/v1/completions` streams. Reasoning text from
+every format is part of the reassembled reply, so DLP sees it.
+
 ## Known gaps
 
-- The Anthropic (`/v1/messages`), Responses (`/v1/responses`) and LM Studio native (`/api/v0`) parsers follow the
-  public API shapes and synthetic samples; real captures from both backends are still to be taken as fixtures.
-- Whether LM Studio needs `stream_options.include_usage` on `/v1` streams is undecided; the rewrite is on for
-  both backends until the fixture pair settles it.
+- A context-overflow 400 from LM Studio has not been captured: the loaded context was the model's full
+  262k tokens. `rejection.rs` is tested against the wordings the terminal monitors recorded (MLX and llama.cpp).
 - An error inside a 2xx stream is recorded as `failed` with the 200 status the client already received.
 - Open streams that outlive the shutdown grace are cut without a `client_aborted` record.
 - Response-side DLP is a single scan of the reassembled text at the end; findings mid-stream and stopping a

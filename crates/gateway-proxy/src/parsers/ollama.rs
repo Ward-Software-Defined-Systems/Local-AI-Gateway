@@ -27,6 +27,7 @@ struct Chunk {
     load_duration: Option<u64>,
     message: Option<Message>,
     response: Option<String>,
+    thinking: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -93,6 +94,9 @@ impl OllamaParser {
         }
         if let Some(content) = chunk.message.as_ref().and_then(|m| m.content.as_deref()) {
             self.text.push(content);
+        }
+        if let Some(thinking) = chunk.thinking.as_deref() {
+            self.text.push(thinking);
         }
         if let Some(response) = chunk.response.as_deref() {
             self.text.push(response);
@@ -197,6 +201,32 @@ mod tests {
 
     const STREAM: &[u8] = include_bytes!("../../../../fixtures/ollama/ollama-chat-stream.jsonl");
     const SINGLE: &[u8] = include_bytes!("../../../../fixtures/ollama/ollama-chat-nonstream.json");
+    const GENERATE_STREAM: &[u8] =
+        include_bytes!("../../../../fixtures/ollama/api-generate-stream.jsonl");
+    const GENERATE_SINGLE: &[u8] =
+        include_bytes!("../../../../fixtures/ollama/api-generate-nonstream.json");
+
+    /// `/api/generate` with a thinking model: `thinking` shards, then the terminal object with counts.
+    #[test]
+    fn fixture_generate_stream_and_single_report_counts_timings_and_thinking() {
+        let s = parse_all(Box::new(OllamaParser::new(true)), GENERATE_STREAM, 53).unwrap();
+        assert_eq!(s.model.as_deref(), Some("gemma4:12b-mlx"));
+        assert_eq!((s.prompt_tokens, s.gen_tokens), (Some(18), Some(8)));
+        assert!(!s.tokens_estimated);
+        assert_eq!(s.stop_reason.as_deref(), Some("length"));
+        assert!(!s.timings_estimated);
+        let tps = s.tokens_per_sec.unwrap();
+        assert!((60.0..70.0).contains(&tps), "8 tokens in 120 ms: {tps}");
+        assert!(s.ttft_ms.unwrap() < 1.0, "a cached prompt: {:?}", s.ttft_ms);
+        assert_eq!(s.text, "The user said \"Say");
+        let single = parse_all(Box::new(OllamaParser::new(false)), GENERATE_SINGLE, 64).unwrap();
+        assert_eq!(
+            (single.prompt_tokens, single.gen_tokens),
+            (Some(18), Some(8))
+        );
+        assert_eq!(single.stop_reason.as_deref(), Some("length"));
+        assert_eq!(single.text, "The user said \"Say");
+    }
 
     #[test]
     fn fixture_stream_yields_engine_timings_and_text() {

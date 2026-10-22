@@ -43,6 +43,20 @@ struct Choice {
 #[serde(default)]
 struct Delta {
     content: Option<String>,
+    /// LM Studio's thinking shards (`reasoning_content`); Ollama's OpenAI layer calls them `reasoning`.
+    reasoning_content: Option<String>,
+    reasoning: Option<String>,
+}
+
+impl Delta {
+    /// Thinking first, then the visible content: both are reply text for scanning and capture.
+    fn texts(&self) -> impl Iterator<Item = &str> {
+        self.reasoning_content
+            .as_deref()
+            .into_iter()
+            .chain(self.reasoning.as_deref())
+            .chain(self.content.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq)]
@@ -118,14 +132,13 @@ impl OpenAiParser {
                 self.delta_count += 1;
             }
             for choice in choices {
-                let content = choice
-                    .delta
-                    .as_ref()
-                    .and_then(|d| d.content.as_deref())
-                    .or_else(|| choice.message.as_ref().and_then(|m| m.content.as_deref()))
-                    .or(choice.text.as_deref());
-                if let Some(content) = content {
-                    self.text.push(content);
+                if let Some(delta) = choice.delta.as_ref().or(choice.message.as_ref()) {
+                    for text in delta.texts() {
+                        self.text.push(text);
+                    }
+                }
+                if let Some(text) = choice.text.as_deref() {
+                    self.text.push(text);
                 }
                 if let Some(reason) = choice.finish_reason {
                     self.finish_reason = Some(reason);
@@ -238,6 +251,149 @@ mod tests {
     use crate::parsers::parse_all;
 
     const SSE: &[u8] = include_bytes!("../../../../fixtures/ollama/openai-compat-sse.txt");
+    const LMS_V1_SSE_NO_OPTS: &[u8] =
+        include_bytes!("../../../../fixtures/lmstudio/v1-chat-sse-without-stream-options.txt");
+    const LMS_V1_SSE_OPTS: &[u8] =
+        include_bytes!("../../../../fixtures/lmstudio/v1-chat-sse-with-stream-options.txt");
+    const LMS_V1_SINGLE: &[u8] =
+        include_bytes!("../../../../fixtures/lmstudio/v1-chat-nonstream.json");
+    const LMS_V0_SSE: &[u8] =
+        include_bytes!("../../../../fixtures/lmstudio/api-v0-chat-stream.txt");
+    const LMS_V0_SSE_OPTS: &[u8] =
+        include_bytes!("../../../../fixtures/lmstudio/api-v0-chat-stream-with-stream-options.txt");
+    const LMS_V0_SINGLE: &[u8] =
+        include_bytes!("../../../../fixtures/lmstudio/api-v0-chat-nonstream.json");
+    const LMS_V0_COMPLETIONS_SSE: &[u8] =
+        include_bytes!("../../../../fixtures/lmstudio/api-v0-completions-stream.txt");
+    const LMS_V1_COMPLETIONS_SSE: &[u8] =
+        include_bytes!("../../../../fixtures/lmstudio/v1-completions-sse.txt");
+    const OLLAMA_V1_COMPLETIONS_SSE: &[u8] =
+        include_bytes!("../../../../fixtures/ollama/v1-completions-sse.txt");
+    const THINKING: &str = "Here's a thinking process:\n\n";
+
+    /// LM Studio 0.4.25: a `/v1/chat/completions` stream carries no usage frame unless the request asks
+    /// for it, which is why the gateway adds `stream_options.include_usage`.
+    #[test]
+    fn fixture_lmstudio_v1_chat_stream_reports_usage_only_with_stream_options() {
+        let without = parse_all(
+            Box::new(OpenAiParser::new(Flavor::Chat, true)),
+            LMS_V1_SSE_NO_OPTS,
+            97,
+        )
+        .unwrap();
+        assert!(without.tokens_estimated);
+        assert_eq!(without.prompt_tokens, None);
+        assert_eq!(without.gen_tokens, Some(8), "eight choice frames stand in");
+        assert_eq!(without.stop_reason.as_deref(), Some("length"));
+        assert_eq!(without.model.as_deref(), Some("qwen/qwen3.6-27b"));
+        assert_eq!(without.text, THINKING, "reasoning shards are reply text");
+        let with = parse_all(
+            Box::new(OpenAiParser::new(Flavor::Chat, true)),
+            LMS_V1_SSE_OPTS,
+            97,
+        )
+        .unwrap();
+        assert_eq!((with.prompt_tokens, with.gen_tokens), (Some(12), Some(7)));
+        assert!(!with.tokens_estimated);
+        assert!(with.timings_estimated, "the /v1 stream has no engine stats");
+        assert_eq!(with.stop_reason.as_deref(), Some("length"));
+        assert_eq!(with.text, THINKING);
+        let single = parse_all(
+            Box::new(OpenAiParser::new(Flavor::Chat, false)),
+            LMS_V1_SINGLE,
+            64,
+        )
+        .unwrap();
+        assert_eq!(
+            (single.prompt_tokens, single.gen_tokens),
+            (Some(12), Some(7))
+        );
+        assert_eq!(single.stop_reason.as_deref(), Some("length"));
+        assert!(
+            single.timings_estimated,
+            "an empty stats object is not a timing"
+        );
+        assert_eq!(single.text, THINKING);
+    }
+
+    /// LM Studio's native chat endpoint streams the same frames as `/v1` (no stats, usage only when asked)
+    /// and puts the engine stats on the non-streaming object.
+    #[test]
+    fn fixture_lmstudio_native_chat_stream_and_single() {
+        let plain = parse_all(
+            Box::new(OpenAiParser::new(Flavor::LmStudio, true)),
+            LMS_V0_SSE,
+            64,
+        )
+        .unwrap();
+        assert!(plain.tokens_estimated);
+        assert!(plain.timings_estimated);
+        let with = parse_all(
+            Box::new(OpenAiParser::new(Flavor::LmStudio, true)),
+            LMS_V0_SSE_OPTS,
+            64,
+        )
+        .unwrap();
+        assert_eq!((with.prompt_tokens, with.gen_tokens), (Some(12), Some(7)));
+        assert!(!with.tokens_estimated);
+        assert!(with.timings_estimated);
+        let single = parse_all(
+            Box::new(OpenAiParser::new(Flavor::LmStudio, false)),
+            LMS_V0_SINGLE,
+            64,
+        )
+        .unwrap();
+        assert_eq!(
+            (single.prompt_tokens, single.gen_tokens),
+            (Some(12), Some(7))
+        );
+        assert_eq!(
+            single.stop_reason.as_deref(),
+            Some("maxPredictedTokensReached")
+        );
+        assert!(!single.timings_estimated);
+        assert!((single.tokens_per_sec.unwrap() - 19.444444444444446).abs() < 1e-9);
+        assert!((single.ttft_ms.unwrap() - 211.0).abs() < 1e-9);
+        assert!(
+            (single.total_ms - 571.0).abs() < 1e-6,
+            "{}",
+            single.total_ms
+        );
+        assert_eq!(single.text, THINKING);
+    }
+
+    /// Completions streams differ from chat: LM Studio puts `usage` (and a draft-token `stats` object
+    /// with no timings) on the final frame unasked; Ollama sends no usage.
+    #[test]
+    fn fixture_completions_streams_carry_inline_usage_on_lmstudio_and_none_on_ollama() {
+        for (flavor, body) in [
+            (Flavor::Completions, LMS_V1_COMPLETIONS_SSE),
+            (Flavor::LmStudio, LMS_V0_COMPLETIONS_SSE),
+        ] {
+            let parsed = parse_all(Box::new(OpenAiParser::new(flavor, true)), body, 50).unwrap();
+            assert_eq!(
+                (parsed.prompt_tokens, parsed.gen_tokens),
+                (Some(2), Some(7))
+            );
+            assert!(!parsed.tokens_estimated);
+            assert!(
+                parsed.timings_estimated,
+                "draft-token counts are not timings"
+            );
+            assert_eq!(parsed.stop_reason.as_deref(), Some("length"));
+            assert!(!parsed.text.is_empty());
+        }
+        let ollama = parse_all(
+            Box::new(OpenAiParser::new(Flavor::Completions, true)),
+            OLLAMA_V1_COMPLETIONS_SSE,
+            50,
+        )
+        .unwrap();
+        assert!(ollama.tokens_estimated);
+        assert_eq!(ollama.gen_tokens, Some(6));
+        assert_eq!(ollama.stop_reason.as_deref(), Some("length"));
+        assert_eq!(ollama.model.as_deref(), Some("gemma4:12b-mlx"));
+    }
     const SSE_NO_USAGE: &[u8] =
         include_bytes!("../../../../fixtures/ollama/openai-compat-sse-cloud-nousage.txt");
     const SINGLE: &[u8] =

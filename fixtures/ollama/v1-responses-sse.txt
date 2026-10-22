@@ -1,0 +1,54 @@
+event: response.created
+data: {"response":{"background":false,"completed_at":null,"created_at":1792702055,"error":null,"frequency_penalty":0,"id":"resp_581547","incomplete_details":null,"instructions":null,"max_output_tokens":16,"max_tool_calls":null,"metadata":{},"model":"gemma4:12b-mlx","object":"response","output":[],"parallel_tool_calls":true,"presence_penalty":0,"previous_response_id":null,"prompt_cache_key":null,"reasoning":null,"safety_identifier":null,"service_tier":"default","status":"in_progress","store":false,"temperature":1,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":null},"sequence_number":0,"type":"response.created"}
+
+event: response.in_progress
+data: {"response":{"background":false,"completed_at":null,"created_at":1792702055,"error":null,"frequency_penalty":0,"id":"resp_581547","incomplete_details":null,"instructions":null,"max_output_tokens":16,"max_tool_calls":null,"metadata":{},"model":"gemma4:12b-mlx","object":"response","output":[],"parallel_tool_calls":true,"presence_penalty":0,"previous_response_id":null,"prompt_cache_key":null,"reasoning":null,"safety_identifier":null,"service_tier":"default","status":"in_progress","store":false,"temperature":1,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":null},"sequence_number":1,"type":"response.in_progress"}
+
+event: response.output_item.added
+data: {"item":{"id":"rs_183685","summary":[],"type":"reasoning"},"output_index":0,"sequence_number":2,"type":"response.output_item.added"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":"The","item_id":"rs_183685","output_index":0,"sequence_number":3,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":" user","item_id":"rs_183685","output_index":0,"sequence_number":4,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":" said","item_id":"rs_183685","output_index":0,"sequence_number":5,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":" \"","item_id":"rs_183685","output_index":0,"sequence_number":6,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":"Say","item_id":"rs_183685","output_index":0,"sequence_number":7,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":" hi","item_id":"rs_183685","output_index":0,"sequence_number":8,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":"\".","item_id":"rs_183685","output_index":0,"sequence_number":9,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":"\nThe","item_id":"rs_183685","output_index":0,"sequence_number":10,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":" user","item_id":"rs_183685","output_index":0,"sequence_number":11,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":" wants","item_id":"rs_183685","output_index":0,"sequence_number":12,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":" a","item_id":"rs_183685","output_index":0,"sequence_number":13,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":" friendly","item_id":"rs_183685","output_index":0,"sequence_number":14,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.reasoning_summary_text.done
+data: {"item_id":"rs_183685","output_index":0,"sequence_number":15,"summary_index":0,"text":"The user said \"Say hi\".\nThe user wants a friendly","type":"response.reasoning_summary_text.done"}
+
+event: response.output_item.done
+data: {"item":{"encrypted_content":"The user said \"Say hi\".\nThe user wants a friendly","id":"rs_183685","summary":[{"text":"The user said \"Say hi\".\nThe user wants a friendly","type":"summary_text"}],"type":"reasoning"},"output_index":0,"sequence_number":16,"type":"response.output_item.done"}
+
+event: response.completed
+data: {"response":{"background":false,"completed_at":1792702055,"created_at":1792702055,"error":null,"frequency_penalty":0,"id":"resp_581547","incomplete_details":null,"instructions":null,"max_output_tokens":16,"max_tool_calls":null,"metadata":{},"model":"gemma4:12b-mlx","object":"response","output":[{"encrypted_content":"The user said \"Say hi\".\nThe user wants a friendly","id":"rs_183685","summary":[{"text":"The user said \"Say hi\".\nThe user wants a friendly","type":"summary_text"}],"type":"reasoning"}],"parallel_tool_calls":true,"presence_penalty":0,"previous_response_id":null,"prompt_cache_key":null,"reasoning":null,"safety_identifier":null,"service_tier":"default","status":"completed","store":false,"temperature":1,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":{"input_tokens":18,"input_tokens_details":{"cached_tokens":17},"output_tokens":16,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":34}},"sequence_number":17,"type":"response.completed"}
+

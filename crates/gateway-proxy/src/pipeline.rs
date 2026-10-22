@@ -373,7 +373,7 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
     let forward_body = if st.listener.rewrite_include_usage
         && matches!(
             meta.api_format,
-            ApiFormat::OpenAiChat | ApiFormat::OpenAiCompletions
+            ApiFormat::OpenAiChat | ApiFormat::OpenAiCompletions | ApiFormat::LmStudioNative
         )
         && fields.streamed
     {

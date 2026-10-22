@@ -1,0 +1,63 @@
+{
+  "id": "resp_48beea356a5b4f02c24b949b262d3afc13dc50ed2b396696",
+  "object": "response",
+  "created_at": 1792702010,
+  "completed_at": 1792702011,
+  "status": "completed",
+  "incomplete_details": null,
+  "model": "qwen/qwen3.6-27b",
+  "previous_response_id": null,
+  "instructions": null,
+  "output": [
+    {
+      "id": "rs_i5dyo5fmbsfdrdzek81xw7",
+      "type": "reasoning",
+      "status": "completed",
+      "summary": [],
+      "content": [
+        {
+          "type": "reasoning_text",
+          "text": "Here's a thinking process:\n\n1.  **Analyze User Input"
+        }
+      ]
+    }
+  ],
+  "error": null,
+  "tools": [],
+  "tool_choice": "auto",
+  "truncation": "auto",
+  "parallel_tool_calls": true,
+  "text": {
+    "format": {
+      "type": "text"
+    }
+  },
+  "top_p": 0.95,
+  "presence_penalty": 0,
+  "frequency_penalty": 0,
+  "top_logprobs": 0,
+  "temperature": 0.6,
+  "reasoning": {
+    "summary": null,
+    "effort": null
+  },
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 15,
+    "total_tokens": 27,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens_details": {
+      "reasoning_tokens": 15
+    }
+  },
+  "max_output_tokens": 16,
+  "max_tool_calls": null,
+  "store": true,
+  "background": false,
+  "service_tier": "default",
+  "metadata": {},
+  "safety_identifier": null,
+  "prompt_cache_key": null
+}

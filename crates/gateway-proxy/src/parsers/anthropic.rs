@@ -2,8 +2,10 @@
 //! events: `message_start` carries the model and `usage.input_tokens`; `content_block_delta` carries
 //! `text_delta` shards; `message_delta` carries `delta.stop_reason` and `usage.output_tokens`;
 //! `message_stop` ends it; an `error` event carries a refusal. Non-streaming is one JSON object with
-//! `content[].text`, `stop_reason` and `usage`. Shapes follow the public API; both backends' real streams
-//! are to be captured as fixtures (Phase 1) to confirm them.
+//! `content[].text`, `stop_reason` and `usage`. Both backends serve it (fixtures under
+//! `fixtures/lmstudio` and `fixtures/ollama`): Ollama splits the prompt between `input_tokens` and
+//! `cache_read_input_tokens`, so the prompt count is their sum, and streams thinking blocks
+//! (`thinking_delta`), which count as reply text here.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -39,6 +41,7 @@ struct Delta {
     #[serde(rename = "type")]
     kind: Option<String>,
     text: Option<String>,
+    thinking: Option<String>,
     stop_reason: Option<String>,
 }
 
@@ -46,7 +49,25 @@ struct Delta {
 #[serde(default)]
 struct Usage {
     input_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+}
+
+impl Usage {
+    /// The whole prompt: Ollama reports cached tokens separately from `input_tokens`.
+    fn prompt_tokens(&self) -> Option<u64> {
+        match (
+            self.input_tokens,
+            self.cache_read_input_tokens,
+            self.cache_creation_input_tokens,
+        ) {
+            (None, None, None) => None,
+            (input, read, created) => {
+                Some(input.unwrap_or(0) + read.unwrap_or(0) + created.unwrap_or(0))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -55,6 +76,7 @@ struct ContentBlock {
     #[serde(rename = "type")]
     kind: Option<String>,
     text: Option<String>,
+    thinking: Option<String>,
 }
 
 pub struct AnthropicParser {
@@ -117,14 +139,14 @@ impl AnthropicParser {
                     // `message_start` reports the prompt size; its `output_tokens` is a placeholder (1) until
                     // `message_delta` carries the real count.
                     if let Some(usage) = start.usage {
-                        self.input_tokens = usage.input_tokens.or(self.input_tokens);
+                        self.input_tokens = usage.prompt_tokens().or(self.input_tokens);
                     }
                 }
             }
             "content_block_delta" => {
                 if let Some(delta) = &event.delta
                     && delta.kind.as_deref() != Some("input_json_delta")
-                    && let Some(text) = &delta.text
+                    && let Some(text) = delta.text.as_deref().or(delta.thinking.as_deref())
                 {
                     self.text.push(text);
                 }
@@ -142,7 +164,7 @@ impl AnthropicParser {
                     if let Some(out) = usage.output_tokens {
                         self.output_tokens = Some(out);
                     }
-                    if let Some(input) = usage.input_tokens {
+                    if let Some(input) = usage.prompt_tokens() {
                         self.input_tokens = Some(input);
                     }
                 }
@@ -153,15 +175,23 @@ impl AnthropicParser {
                     self.model.get_or_insert(model.clone());
                 }
                 if let Some(usage) = event.usage {
-                    self.input_tokens = usage.input_tokens;
+                    self.input_tokens = usage.prompt_tokens();
                     self.output_tokens = usage.output_tokens;
                 }
                 self.stop_reason = event.stop_reason.clone();
                 for block in event.content.unwrap_or_default() {
-                    if block.kind.as_deref() == Some("text")
-                        && let Some(text) = &block.text
-                    {
-                        self.text.push(text);
+                    match block.kind.as_deref() {
+                        Some("text") => {
+                            if let Some(text) = &block.text {
+                                self.text.push(text);
+                            }
+                        }
+                        Some("thinking") => {
+                            if let Some(thinking) = &block.thinking {
+                                self.text.push(thinking);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 self.message_delta_seen = true;
@@ -295,5 +325,52 @@ mod tests {
         let parsed = parse_all(Box::new(AnthropicParser::new(true)), error, 64).unwrap();
         assert_eq!(parsed.in_stream_error.as_deref(), Some("Overloaded"));
         assert!(parse_all(Box::new(AnthropicParser::new(true)), b"", 64).is_none());
+    }
+
+    const LMS_STREAM: &[u8] = include_bytes!("../../../../fixtures/lmstudio/v1-messages-sse.txt");
+    const LMS_SINGLE: &[u8] =
+        include_bytes!("../../../../fixtures/lmstudio/v1-messages-nonstream.json");
+    const OLLAMA_STREAM: &[u8] = include_bytes!("../../../../fixtures/ollama/v1-messages-sse.txt");
+    const OLLAMA_SINGLE: &[u8] =
+        include_bytes!("../../../../fixtures/ollama/v1-messages-nonstream.json");
+
+    #[test]
+    fn fixture_lmstudio_messages_stream_and_single() {
+        for chunk in [7, 77, 4096] {
+            let s = parse_all(Box::new(AnthropicParser::new(true)), LMS_STREAM, chunk).unwrap();
+            assert_eq!(s.model.as_deref(), Some("qwen/qwen3.6-27b"));
+            assert_eq!((s.prompt_tokens, s.gen_tokens), (Some(14), Some(7)));
+            assert!(!s.tokens_estimated);
+            assert_eq!(s.stop_reason.as_deref(), Some("max_tokens"));
+            assert_eq!(s.text, "Hi there! How can I help");
+        }
+        let single = parse_all(Box::new(AnthropicParser::new(false)), LMS_SINGLE, 64).unwrap();
+        assert_eq!(
+            (single.prompt_tokens, single.gen_tokens),
+            (Some(14), Some(3))
+        );
+        assert_eq!(single.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(single.text, "Hi!");
+    }
+
+    #[test]
+    fn fixture_ollama_messages_sum_cached_input_tokens_and_keep_thinking_text() {
+        let s = parse_all(Box::new(AnthropicParser::new(true)), OLLAMA_STREAM, 77).unwrap();
+        assert_eq!(s.model.as_deref(), Some("gemma4:12b-mlx"));
+        assert_eq!(
+            (s.prompt_tokens, s.gen_tokens),
+            (Some(18), Some(8)),
+            "message_delta's count replaces message_start's placeholder"
+        );
+        assert_eq!(s.stop_reason.as_deref(), Some("max_tokens"));
+        assert_eq!(s.text, "The user said \"Say");
+        let single = parse_all(Box::new(AnthropicParser::new(false)), OLLAMA_SINGLE, 64).unwrap();
+        assert_eq!(
+            (single.prompt_tokens, single.gen_tokens),
+            (Some(18), Some(8)),
+            "input_tokens 1 plus cache_read_input_tokens 17"
+        );
+        assert_eq!(single.stop_reason.as_deref(), Some("max_tokens"));
+        assert_eq!(single.text, "The user said \"Say");
     }
 }

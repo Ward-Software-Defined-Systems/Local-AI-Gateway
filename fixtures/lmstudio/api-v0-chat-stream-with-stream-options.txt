@@ -1,0 +1,20 @@
+data: {"id":"chatcmpl-ed20gqhy3rmhduhr10zb8","object":"chat.completion.chunk","created":1792702202,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Here"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ed20gqhy3rmhduhr10zb8","object":"chat.completion.chunk","created":1792702202,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[{"index":0,"delta":{"reasoning_content":"'s"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ed20gqhy3rmhduhr10zb8","object":"chat.completion.chunk","created":1792702202,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[{"index":0,"delta":{"reasoning_content":" a"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ed20gqhy3rmhduhr10zb8","object":"chat.completion.chunk","created":1792702202,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[{"index":0,"delta":{"reasoning_content":" thinking"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ed20gqhy3rmhduhr10zb8","object":"chat.completion.chunk","created":1792702202,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[{"index":0,"delta":{"reasoning_content":" process"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ed20gqhy3rmhduhr10zb8","object":"chat.completion.chunk","created":1792702202,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[{"index":0,"delta":{"reasoning_content":":"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ed20gqhy3rmhduhr10zb8","object":"chat.completion.chunk","created":1792702202,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[{"index":0,"delta":{"reasoning_content":"\n\n"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ed20gqhy3rmhduhr10zb8","object":"chat.completion.chunk","created":1792702202,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"length"}]}
+
+data: {"id":"chatcmpl-ed20gqhy3rmhduhr10zb8","object":"chat.completion.chunk","created":1792702202,"model":"qwen/qwen3.6-27b","system_fingerprint":"qwen/qwen3.6-27b","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19,"completion_tokens_details":{"reasoning_tokens":7}}}
+
+data: [DONE]
+

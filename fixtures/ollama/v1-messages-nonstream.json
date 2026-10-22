@@ -1,0 +1,1 @@
+{"id":"msg_5e0956a68d98e63c1798f4ad","type":"message","role":"assistant","model":"gemma4:12b-mlx","content":[{"type":"thinking","thinking":"The user said \"Say"}],"stop_reason":"max_tokens","usage":{"input_tokens":1,"cache_read_input_tokens":17,"output_tokens":8}}

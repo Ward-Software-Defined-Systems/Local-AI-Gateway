@@ -84,6 +84,8 @@ The status bar shows backend reachability and versions, the live-socket state, u
 
 "Live" sections apply when you save in the Settings tab, call `POST /api/config/reload`, or send `SIGHUP`. The Settings tab shows which sections still need a restart.
 
+`rewrite_include_usage` adds `stream_options.include_usage` to streaming chat and completion requests (`/v1/chat/completions`, `/v1/completions` and LM Studio's `/api/v0/chat/completions`). LM Studio sends no token counts on a stream without it; Ollama sends them either way. It is the only change the gateway makes to a request.
+
 ## DLP
 
 Every inference request body is scanned before it is forwarded: JSON bodies leaf by leaf (a finding says `$.messages[3].content`), anything else as text. The reply text is scanned when the response ends. A finding records the rule, severity, location, a 32-character fingerprint and a masked preview (`AKIA…MPLE`); the plaintext is never stored, logged or shown. Stored copies replace each value with `[REDACTED:<rule>:<fingerprint>]`, so a redacted JSON body stays valid JSON.
@@ -173,8 +175,9 @@ Request metadata and findings are kept indefinitely; bodies expire after `retent
 
 ## Known issues
 
-- Whether LM Studio needs `stream_options.include_usage` on `/v1` streams is undecided; the rewrite is on for both backends until a fixture pair settles it.
-- The Anthropic, Responses and LM Studio native parsers follow the public API shapes; captures from both backends are still being collected as fixtures.
+- LM Studio reports zero prompt tokens for embeddings (`usage.prompt_tokens: 0`), so embedding requests on that backend show no prompt count.
+- LM Studio's native streaming endpoint carries no engine `stats` (tokens per second, time to first token); those arrive on non-streaming `/api/v0` requests only. Streams get the gateway's wall-clock figures, marked `~`.
+- A context-overflow rejection from LM Studio (HTTP 400) is parsed from the wordings the terminal monitors recorded; a fresh capture is still wanted.
 - An error inside a 2xx stream is recorded as `failed` with the 200 status the client already received.
 - Open streams that outlive the five-second shutdown grace are cut without a record.
 - Reply text is scanned once at the end of the response, not incrementally.
