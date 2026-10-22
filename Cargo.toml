@@ -1,0 +1,81 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+repository = "https://github.com/Ward-Software-Defined-Systems/Local-AI-Gateway"
+authors = ["Ward Software Defined Systems LLC"]
+
+[workspace.dependencies]
+# crates in this workspace
+gateway-core = { path = "crates/gateway-core" }
+gateway-proxy = { path = "crates/gateway-proxy" }
+gateway-dlp = { path = "crates/gateway-dlp" }
+gateway-backends = { path = "crates/gateway-backends" }
+gateway-hardware = { path = "crates/gateway-hardware" }
+
+# async runtime and streams
+tokio = { version = "1.52", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = "0.1"
+futures-util = "0.3"
+bytes = "1.11"
+
+# HTTP: reverse proxy listeners and the dashboard
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "macros", "json", "query", "ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+hyper = "1.9"
+hyper-util = { version = "0.1", features = ["tokio"] }
+# rustls is a direct dependency so main can install one CryptoProvider (ring) explicitly: reqwest and
+# axum-server would otherwise each bring their own and rustls refuses to guess.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rcgen = "0.13"
+
+# HTTP client: upstream requests, backend pollers, webhook sink. No http2: upstreams are plain-HTTP
+# localhost and the WebSocket tunnel needs HTTP/1.1.
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "stream", "rustls-tls", "blocking"] }
+
+# storage
+rusqlite = { version = "0.39", features = ["bundled"] }
+
+# system telemetry
+sysinfo = "0.38.4"
+libc = "0.2"
+
+# serialisation and config
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+toml = "1.1"
+
+# CLI
+clap = { version = "4.6", features = ["derive", "env"] }
+
+# logging
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2.5"
+
+# errors, time, ids, hashing
+anyhow = "1"
+thiserror = "2"
+chrono = { version = "0.4.44", default-features = false, features = ["clock", "serde"] }
+uuid = { version = "1.23", features = ["v7", "serde"] }
+regex = "1.12"
+sha2 = "0.10"
+subtle = "2.6"
+
+# embedded dashboard
+rust-embed = { version = "8.11", features = ["interpolate-folder-path"] }
+
+# dev
+tempfile = "3"
+tokio-tungstenite = "0.28"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

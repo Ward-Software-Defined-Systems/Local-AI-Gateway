@@ -1,0 +1,127 @@
+# WSDS Local AI Gateway configuration. Every key is optional; the values shown are the defaults.
+# A missing file means "all defaults". Unknown keys are errors, so a typo cannot silently disable a feature.
+# Relative file names are resolved inside the data directory.
+
+[dashboard]
+# Where the web dashboard listens. Keep it on loopback unless you reach it from another machine.
+listen = "127.0.0.1:8787"
+# Require the access token (printed at startup and by `local-ai-gateway --print-token`).
+# May only be false on a loopback address.
+auth = true
+# "auto" serves HTTPS with a self-signed certificate on non-loopback addresses and plain HTTP on loopback;
+# "on" and "off" force it.
+tls = "auto"
+token_file = "dashboard.token"
+
+[backends.lmstudio]
+enabled = true
+# One or more addresses the gateway listens on for LM Studio clients.
+listen = ["127.0.0.1:1235"]
+# Where LM Studio itself serves (stock port 1234).
+upstream = "http://127.0.0.1:1234"
+# Store request and response bodies for the Requests tab (DLP-redacted, retention below).
+capture_bodies = true
+# Record non-inference requests (model lists, pulls) as metadata-only rows.
+record_passthrough = true
+# Add stream_options.include_usage to streaming /v1 requests so token counts arrive.
+rewrite_include_usage = true
+# Seconds between model-list polls.
+poll_interval_secs = 2
+# Optional, LM Studio only: the lms CLI and the app bundle, used for version lookup.
+# lms_bin = "~/.lmstudio/bin/lms"
+# app_path = "/Applications/LM Studio.app"
+
+[backends.ollama]
+enabled = true
+listen = ["127.0.0.1:11435"]
+upstream = "http://127.0.0.1:11434"
+capture_bodies = true
+record_passthrough = true
+rewrite_include_usage = true
+poll_interval_secs = 2
+
+[capture]
+# Per stored body; larger bodies are truncated and flagged.
+max_body_bytes = 4194304
+# Bodies older than this are deleted; request metadata and findings are kept.
+retention_days = 7
+passthrough_retention_hours = 24
+hardware_raw_retention_hours = 48
+# Inference request bodies are buffered up to this size for scanning; larger ones are refused with 413.
+max_buffered_request_bytes = 67108864
+
+[dlp]
+enabled = true
+# record | alert | block, for request-side findings whose rule has no explicit action.
+default_action = "alert"
+# record | alert, for response-side findings.
+response_action = "alert"
+redact_stored_copies = true
+# Findings at or above this severity reach the notification sinks; everything is kept in the Security tab.
+notify_min_severity = "high"
+# Exact secret values to watch for (TOML, mode 0600): [[secret]] kind = "...", value = "..."
+known_secrets_file = "known-secrets.toml"
+max_scan_bytes = 8388608
+
+[dlp.cloud]
+# Requests routed to Ollama ":cloud" models leave the machine, so secrets are blocked by default.
+request_action = "block"
+pii_action = "alert"
+
+# Per-rule overrides, for example:
+# [dlp.rules.email]
+# action = "record"
+# redact = false
+
+# Per-backend overrides, for example:
+# [dlp.backends.lmstudio]
+# request_action = "record"
+
+# Custom rules:
+# [[dlp.custom_rules]]
+# id = "acme-ticket-id"
+# description = "ACME ticket identifiers"
+# regex = "\\bACME-[0-9]{6}\\b"
+# severity = "medium"
+# action = "alert"
+
+# Allowlist entries remove matches before any action is taken:
+# [[dlp.allowlist]]
+# rule = "openai-api-key"
+# regex = "^sk-(lm-studio|ollama|no-key|xxx|dummy)$"
+
+[alerts]
+# Minimum seconds between notifications for the same (kind, rule, backend); the in-app list is never throttled.
+throttle_secs = 30
+
+[alerts.desktop_notification]
+# osascript on macOS, notify-send on a Linux desktop.
+enabled = true
+min_severity = "high"
+
+[alerts.webhook]
+enabled = false
+# url = "https://example.invalid/hook"
+# headers = { Authorization = "Bearer ..." }   # or headers_file = "webhook-headers.toml" (mode 0600)
+min_severity = "high"
+timeout_secs = 5
+
+# Frontier price overrides use the shape of pricing.toml:
+# [pricing.providers.google.models.gemini-3-1-pro]
+# input_per_mtok_usd = 4.00
+# output_per_mtok_usd = 18.00
+
+[hardware]
+enabled = true
+sample_interval_secs = 2
+# auto picks ioreg on macOS and nvidia-smi on Linux; ioreg | nvidia-smi | none force it.
+gpu_source = "auto"
+# off | sudo: ANE power on macOS needs `sudo -n powermetrics`, which a service can only run with a
+# NOPASSWD sudoers rule for /usr/bin/powermetrics.
+powermetrics = "off"
+
+[log]
+# tracing filter syntax, e.g. "info" or "info,gateway_proxy=debug".
+level = "info"
+# Daily log files kept.
+max_files = 14

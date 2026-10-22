@@ -1,0 +1,104 @@
+# Build the dashboard, then format, lint and test the Rust workspace on Linux.
+#
+# The gateway targets macOS and Linux. Only the GPU telemetry child (ioreg / powermetrics / nvidia-smi),
+# the backend process hints, the desktop-notification sink and the app directories are platform-specific,
+# and every parser compiles on every platform, so the full test suite runs here. The frontend job hands
+# dist/ to the Rust jobs so the embed path is exercised, not the placeholder. Pipeline secret detection is
+# configured at the GitLab level.
+
+workflow:
+  rules:
+    # Merge request pipelines; branch pipelines only when no MR is open (so one push doesn't run twice); tags.
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+stages:
+  - build
+  - lint
+  - test
+  - release
+
+default:
+  # Pinned to the toolchain used for development (rust-toolchain.toml) so new lints don't break CI.
+  image: rust:1.97-bookworm
+  interruptible: true
+
+variables:
+  # Keep cargo's registry inside the project dir so GitLab can cache it.
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo-home
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+.cargo-cache:
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo-home/registry/index/
+      - .cargo-home/registry/cache/
+      - .cargo-home/git/db/
+      - target/
+
+frontend:
+  stage: build
+  image: node:24-bookworm
+  cache:
+    key:
+      files:
+        - frontend/package-lock.json
+    paths:
+      - frontend/node_modules/
+  script:
+    - cd frontend
+    - npm ci
+    - npm run typecheck
+    - npm run lint
+    - npm run build
+  artifacts:
+    name: dashboard-dist
+    paths:
+      - frontend/dist/
+    expire_in: 1 day
+
+fmt:
+  stage: lint
+  script:
+    - rustup component add rustfmt
+    - cargo fmt --all --check
+
+clippy:
+  stage: lint
+  extends: .cargo-cache
+  needs: [frontend]
+  script:
+    - test -f frontend/dist/index.html
+    - rustup component add clippy
+    - cargo clippy --workspace --all-targets --locked -- -D warnings
+
+test:
+  stage: test
+  extends: .cargo-cache
+  needs: [frontend]
+  script:
+    - test -f frontend/dist/index.html
+    - cargo test --workspace --locked
+
+release-linux:
+  stage: release
+  extends: .cargo-cache
+  needs: [frontend, test]
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - test -f frontend/dist/index.html
+    - cargo build --release --locked
+    - ls -la target/release/local-ai-gateway
+  artifacts:
+    name: local-ai-gateway-linux-x86_64-$CI_COMMIT_TAG
+    paths:
+      - target/release/local-ai-gateway
+    expire_in: 30 days

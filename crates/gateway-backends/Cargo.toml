@@ -1,0 +1,19 @@
+[package]
+name = "gateway-backends"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "LM Studio and Ollama API clients and pollers for the Local AI Gateway"
+publish = false
+
+[dependencies]
+gateway-core.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true

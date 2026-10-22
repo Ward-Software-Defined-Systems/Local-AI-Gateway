@@ -1,0 +1,46 @@
+[package]
+name = "local-ai-gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WSDS Local AI Gateway: monitoring, request inspection and DLP reverse proxy for LM Studio and Ollama, with a web dashboard"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "local-ai-gateway"
+path = "src/main.rs"
+
+[dependencies]
+gateway-core.workspace = true
+gateway-proxy.workspace = true
+gateway-dlp.workspace = true
+gateway-backends.workspace = true
+gateway-hardware.workspace = true
+reqwest.workspace = true
+libc.workspace = true
+
+anyhow.workspace = true
+axum.workspace = true
+axum-server.workspace = true
+chrono.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+rcgen.workspace = true
+rust-embed.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subtle.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

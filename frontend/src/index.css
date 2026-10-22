@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+/* Colour roles. The categorical slots are the validated dark steps from the data-viz reference palette
+   (checked against the panel surface #18181b); status colours are the fixed status scale. */
+:root {
+  color-scheme: dark;
+  --page: #09090b;
+  --surface-1: #18181b;
+  --surface-2: #1f1f23;
+  --text-primary: #f4f4f5;
+  --text-secondary: #a1a1aa;
+  --text-muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+  --series-other: #6b6b66;
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  background: var(--page);
+}
+
+.ink-good { color: var(--status-good); }
+.ink-warning { color: var(--status-warning); }
+.ink-serious { color: var(--status-serious); }
+.ink-critical { color: var(--status-critical); }
+.ink-cloud { color: var(--series-5); }
+.ink-muted { color: var(--text-muted); }
+
+/* Recharts text wears text tokens, never the series colour. */
+.recharts-legend-item-text,
+.recharts-cartesian-axis-tick-value {
+  fill: var(--text-muted) !important;
+  color: var(--text-secondary) !important;
+}

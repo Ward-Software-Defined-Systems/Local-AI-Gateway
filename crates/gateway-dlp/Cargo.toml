@@ -1,0 +1,21 @@
+[package]
+name = "gateway-dlp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Secret and PII detection, redaction and policy for the Local AI Gateway"
+publish = false
+
+[dependencies]
+gateway-core.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+toml.workspace = true
+tracing.workspace = true
+uuid.workspace = true

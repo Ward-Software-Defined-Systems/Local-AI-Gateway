@@ -1,0 +1,18 @@
+[package]
+name = "gateway-hardware"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "System, GPU and process telemetry for the Local AI Gateway (sysinfo, ioreg, nvidia-smi, powermetrics)"
+publish = false
+
+[dependencies]
+gateway-core.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+libc.workspace = true
+sysinfo.workspace = true
+tokio.workspace = true
+tracing.workspace = true
