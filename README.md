@@ -201,4 +201,4 @@ A unified `/v1` endpoint with model routing and aliases · per-client API keys a
 
 ## Licence
 
-MIT, © Ward Software Defined Systems LLC.
+Proprietary, see [LICENSE](LICENSE). Personal evaluation and non-commercial experimentation are permitted; commercial use needs a separate licence from Ward Software Defined Systems LLC.

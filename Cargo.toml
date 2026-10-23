@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
-license = "MIT"
+license-file = "LICENSE"
 repository = "https://github.com/Ward-Software-Defined-Systems/Local-AI-Gateway"
 authors = ["Ward Software Defined Systems LLC"]
 
