@@ -11,6 +11,14 @@ import FindingsTable from './FindingsTable'
 type Tab = 'overview' | 'request' | 'response' | 'headers' | 'timeline' | 'findings'
 const TABS: Tab[] = ['overview', 'request', 'response', 'headers', 'timeline', 'findings']
 
+/** `rejected (input 6000 tokens, context 2048)`, with only the parts the backend reported. */
+function rejectedText(input: number | null, context: number | null): string {
+  const parts: string[] = []
+  if (input !== null) parts.push(`input ${input} tokens`)
+  if (context !== null) parts.push(`context ${context}`)
+  return parts.length ? `rejected (${parts.join(', ')})` : 'rejected (prompt longer than the loaded context)'
+}
+
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <>
@@ -29,7 +37,7 @@ function Overview({ detail }: { detail: Detail }) {
       : outcome.kind === 'failed'
         ? `failed (HTTP ${outcome.status}, ${outcome.source})`
         : outcome.kind === 'rejected'
-          ? `rejected (input ${outcome.input_tokens ?? '?'} tokens, context ${outcome.context_length ?? '?'})`
+          ? rejectedText(outcome.input_tokens, outcome.context_length)
           : outcome.kind === 'blocked'
             ? `blocked by DLP rule ${outcome.rule_id}`
             : 'client aborted'

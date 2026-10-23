@@ -189,7 +189,7 @@ Request metadata and findings are kept indefinitely; bodies expire after `retent
 
 - LM Studio reports zero prompt tokens for embeddings (`usage.prompt_tokens: 0`), so embedding requests on that backend show no prompt count.
 - LM Studio's native streaming endpoint carries no engine `stats` (tokens per second, time to first token); those arrive on non-streaming `/api/v0` requests only. Streams get the gateway's wall-clock figures, marked `~`.
-- A context-overflow rejection from LM Studio (HTTP 400) is parsed from the wordings the terminal monitors recorded; a fresh capture is still wanted.
+- LM Studio 0.4.25 refuses an oversized prompt without saying how long it was, so a rejected row shows the loaded context length (taken from the model list) and no input count. The refusal is HTTP 400 on the chat and completion routes, 500 on `/v1/messages` and `/v1/responses`, and an error event inside a 200 stream when streaming; all are recorded as `rejected`.
 - An error inside a 2xx stream is recorded as `failed` with the 200 status the client already received.
 - Open streams that outlive the five-second shutdown grace are cut without a record.
 - Reply text is scanned once at the end of the response, not incrementally.

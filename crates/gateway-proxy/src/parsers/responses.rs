@@ -414,4 +414,26 @@ mod tests {
         );
         assert_eq!(single.text, OLLAMA_REASONING);
     }
+
+    #[test]
+    fn fixture_lmstudio_responses_stream_overflow_is_an_error_event() {
+        // LM Studio 0.4.25 refusing an oversized prompt: `response.created`, `response.in_progress`, then
+        // `error` and `response.failed`, all in a 200 stream. The model comes from `response.created`.
+        let body =
+            include_bytes!("../../../../fixtures/lmstudio/v1-responses-sse-context-overflow.txt");
+        let parsed =
+            crate::parsers::parse_all(Box::new(ResponsesParser::new(true)), body, 32).unwrap();
+        let message = parsed.in_stream_error.as_deref().unwrap();
+        assert!(
+            message.starts_with("The number of tokens to keep"),
+            "{message}"
+        );
+        assert_eq!(
+            crate::rejection::parse_overflow(message),
+            Some((None, None))
+        );
+        assert_eq!(parsed.model.as_deref(), Some("laig-overflow-test"));
+        assert_eq!(parsed.stop_reason, None);
+        assert!(parsed.text.is_empty());
+    }
 }

@@ -373,4 +373,24 @@ mod tests {
         assert_eq!(single.stop_reason.as_deref(), Some("max_tokens"));
         assert_eq!(single.text, "The user said \"Say");
     }
+
+    #[test]
+    fn fixture_lmstudio_messages_stream_overflow_is_an_error_event() {
+        // A 200 stream whose only frame is `event: error`; LM Studio 0.4.25 refusing an oversized prompt.
+        let body =
+            include_bytes!("../../../../fixtures/lmstudio/v1-messages-sse-context-overflow.txt");
+        let parsed =
+            crate::parsers::parse_all(Box::new(AnthropicParser::new(true)), body, 32).unwrap();
+        let message = parsed.in_stream_error.as_deref().unwrap();
+        assert!(
+            message.starts_with("The number of tokens to keep"),
+            "{message}"
+        );
+        assert_eq!(
+            crate::rejection::parse_overflow(message),
+            Some((None, None))
+        );
+        assert_eq!(parsed.stop_reason, None);
+        assert!(parsed.text.is_empty());
+    }
 }

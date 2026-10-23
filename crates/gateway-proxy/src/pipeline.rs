@@ -23,7 +23,7 @@ use futures_util::{Stream, StreamExt};
 use gateway_core::events::{GatewayEvent, publish};
 use gateway_core::types::{
     ApiFormat, Backend, Body as StoredBody, Direction, FailureSource, Finding, InflightRequest,
-    Outcome, RequestKind, RequestRecord, Severity,
+    ModelInfo, Outcome, RequestKind, RequestRecord, Severity,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -358,10 +358,13 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
         finish_failed(
             &st,
             meta,
-            Outcome::Blocked {
-                rule_id: rule_id.clone(),
+            Failure {
+                status: err.status().as_u16(),
+                outcome: Outcome::Blocked {
+                    rule_id: rule_id.clone(),
+                },
+                error_summary: Some(err.to_string()),
             },
-            Some(err.to_string()),
             stored_request,
             None,
             scan.findings,
@@ -416,16 +419,22 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
     if status.is_client_error() || status.is_server_error() {
         let error_body = collect_capped(upstream.bytes_stream(), ERROR_BODY_CAP).await;
         let summary = rejection::error_summary(&error_body);
-        let outcome = match (
-            meta.backend,
-            status.as_u16(),
-            summary.as_deref().and_then(rejection::parse_overflow),
-        ) {
-            (Backend::LmStudio, 400, Some((input_tokens, context_length))) => Outcome::Rejected {
-                input_tokens,
-                context_length,
-            },
-            _ => Outcome::Failed {
+        // LM Studio refuses an oversized prompt with 400 on its chat and completion routes and 500 on
+        // /v1/messages and /v1/responses; the message decides, not the status.
+        let overflow = (meta.backend == Backend::LmStudio)
+            .then(|| summary.as_deref().and_then(rejection::parse_overflow))
+            .flatten();
+        let outcome = match overflow {
+            Some((input_tokens, context_length)) => {
+                let models = st.ctx.backends.models(meta.backend).await;
+                Outcome::Rejected {
+                    input_tokens,
+                    context_length: context_length.or_else(|| {
+                        loaded_context_length(&models, meta.model_requested.as_deref())
+                    }),
+                }
+            }
+            None => Outcome::Failed {
                 status: status.as_u16(),
                 source: FailureSource::Upstream,
             },
@@ -445,8 +454,11 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
         finish_failed(
             &st,
             meta,
-            outcome,
-            summary,
+            Failure {
+                status: status.as_u16(),
+                outcome,
+                error_summary: summary,
+            },
             stored_request,
             stored_response,
             scan.findings,
@@ -615,11 +627,17 @@ impl Finisher {
         let (raw, response_bytes, truncated) = capture.into_bytes();
         let parsed = parsed.unwrap_or_default();
         let unfinished = parsed.stop_reason.as_deref().is_none_or(|s| s == "unknown");
+        let models = st.ctx.backends.models(meta.backend).await;
         let outcome = match (&parsed.in_stream_error, &end) {
             (Some(message), _) => match (meta.backend, rejection::parse_overflow(message)) {
                 (Backend::LmStudio, Some((input_tokens, context_length))) => Outcome::Rejected {
                     input_tokens,
-                    context_length,
+                    context_length: context_length.or_else(|| {
+                        loaded_context_length(
+                            &models,
+                            parsed.model.as_deref().or(meta.model_requested.as_deref()),
+                        )
+                    }),
                 },
                 _ => Outcome::Failed {
                     status,
@@ -667,7 +685,6 @@ impl Finisher {
         let mut findings = request_findings;
         findings.extend(response_scan.findings.clone());
 
-        let models = st.ctx.backends.models(meta.backend).await;
         let model_resolved = gateway_backends::ollama::resolve_model_id(
             &models,
             parsed.model.as_deref().or(meta.model_requested.as_deref()),
@@ -829,22 +846,40 @@ async fn complete(
     );
 }
 
-/// Records a request that ended without a parsed response: a gateway failure, a block, or an upstream error.
+/// The context the backend has loaded for the model a request named, for a rejection whose message
+/// carries no number: LM Studio 0.4.25 only says the prompt is longer than the context.
+fn loaded_context_length(models: &[ModelInfo], model: Option<&str>) -> Option<u64> {
+    let id = gateway_backends::ollama::resolve_model_id(models, model)?;
+    models
+        .iter()
+        .find(|m| m.id == id)
+        .and_then(|m| m.loaded_context_length)
+}
+
+/// How a request ended without a parsed response, and what the client received.
+struct Failure {
+    /// The status the client received.
+    status: u16,
+    outcome: Outcome,
+    error_summary: Option<String>,
+}
+
+/// Records a request that ended without a parsed response: a gateway failure, a block, or an upstream
+/// error.
 async fn finish_failed(
     st: &ProxyState,
     meta: RequestMeta,
-    outcome: Outcome,
-    error_summary: Option<String>,
+    failure: Failure,
     stored_request: Option<(Vec<u8>, bool)>,
     stored_response: Option<StoredBody>,
     findings: Vec<Finding>,
 ) {
-    let status = match &outcome {
-        Outcome::Failed { status, .. } => Some(*status),
-        Outcome::Rejected { .. } => Some(400),
-        Outcome::Blocked { .. } => Some(403),
-        Outcome::Completed | Outcome::ClientAborted => None,
-    };
+    let Failure {
+        status,
+        outcome,
+        error_summary,
+    } = failure;
+    let status = Some(status);
     let mut bodies = Vec::new();
     if let Some((stored, redacted)) = stored_request {
         bodies.push(stored_body(
@@ -969,11 +1004,14 @@ async fn fail_gateway(
     finish_failed(
         st,
         meta,
-        Outcome::Failed {
+        Failure {
             status: err.status().as_u16(),
-            source: FailureSource::Gateway,
+            outcome: Outcome::Failed {
+                status: err.status().as_u16(),
+                source: FailureSource::Gateway,
+            },
+            error_summary: Some(err.to_string()),
         },
-        Some(err.to_string()),
         stored_request,
         None,
         findings,

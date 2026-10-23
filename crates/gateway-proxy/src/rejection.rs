@@ -1,7 +1,8 @@
 //! Error bodies: the one-line summary kept on a failed record, and LM Studio's context-overflow refusal
 //! parsed into the prompt size and context length so the feed can show `rejected (ctx N)`. The message
-//! regexes are LMS-Monitor's, which read them from the server log; here they arrive as the 400 body or as
-//! an error frame inside an open stream.
+//! patterns are LMS-Monitor's, which read them from the server log; here they arrive as a 4xx or 5xx body
+//! or as an error frame inside an open 200 stream. LM Studio 0.4.25 sends the "tokens to keep" wording
+//! with no numbers at all, so the pipeline takes the context length from the model list.
 
 use serde_json::Value;
 
@@ -66,7 +67,8 @@ pub fn parse_overflow(message: &str) -> Option<(Option<u64>, Option<u64>)> {
         ));
     }
     // Any engine, when the overflow policy cannot keep the start of the prompt: "(n_keep: 13055 >=
-    // n_ctx: 4096)"; n_keep is not the whole prompt, so only the context length is taken.
+    // n_ctx: 4096)"; n_keep is not the whole prompt, so only the context length is taken. LM Studio
+    // 0.4.25 (MLX) sends this wording without the numbers (fixtures `*-context-overflow.*`).
     if message.contains("tokens to keep from the initial prompt is greater than the context length")
     {
         return Some((None, number_after(message, "n_ctx: ")));
@@ -126,6 +128,29 @@ mod tests {
             error_summary(openai).as_deref(),
             Some("input after truncation exceeds maximum context length")
         );
+    }
+
+    #[test]
+    fn fixture_lmstudio_overflow_bodies_are_rejections_without_numbers() {
+        // LM Studio 0.4.25 (MLX), a 6000-token prompt into a 2048-token context: 400 on the OpenAI and
+        // native chat and completion routes, 500 on /v1/messages and /v1/responses, one wording for all.
+        let bodies: [&[u8]; 5] = [
+            include_bytes!("../../../fixtures/lmstudio/v1-chat-400-context-overflow.json"),
+            include_bytes!("../../../fixtures/lmstudio/api-v0-chat-400-context-overflow.json"),
+            include_bytes!("../../../fixtures/lmstudio/v1-completions-400-context-overflow.json"),
+            include_bytes!("../../../fixtures/lmstudio/v1-messages-500-context-overflow.json"),
+            include_bytes!("../../../fixtures/lmstudio/v1-responses-500-context-overflow.json"),
+        ];
+        for body in bodies {
+            let summary = error_summary(body).unwrap();
+            assert!(
+                summary.starts_with(
+                    "The number of tokens to keep from the initial prompt is greater than the context length"
+                ),
+                "{summary}"
+            );
+            assert_eq!(parse_overflow(&summary), Some((None, None)));
+        }
     }
 
     const MLX: &str = "Input does not fit in context length. The input has 359277 tokens, but the context length only supports 262144 tokens.";

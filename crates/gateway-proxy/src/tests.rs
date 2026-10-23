@@ -17,7 +17,8 @@ use gateway_core::events::{EventReceiver, GatewayEvent};
 use gateway_core::pricing::PricingTable;
 use gateway_core::state::BackendsState;
 use gateway_core::types::{
-    ApiFormat, Backend, Direction, FailureSource, Outcome, RequestKind, RequestRecord,
+    ApiFormat, Backend, BackendSnapshot, Direction, FailureSource, ModelInfo, ModelState, Outcome,
+    RequestKind, RequestRecord,
 };
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -535,6 +536,150 @@ async fn an_error_frame_inside_an_open_stream_is_a_rejection_too() {
             .as_deref()
             .unwrap()
             .starts_with("Input does not fit")
+    );
+}
+
+/// What the LM Studio poller publishes for a loaded model: enough for the context-length fallback.
+fn snapshot_with_loaded_model(id: &str, context: u64) -> BackendSnapshot {
+    BackendSnapshot {
+        backend: Backend::LmStudio,
+        reachable: true,
+        version: None,
+        error: None,
+        models: vec![ModelInfo {
+            backend: Backend::LmStudio,
+            id: id.to_string(),
+            kind: Some("vlm".into()),
+            compatibility_type: Some("mlx".into()),
+            quantization: None,
+            max_context_length: Some(262_144),
+            loaded_context_length: Some(context),
+            state: ModelState::Loaded,
+            publisher: None,
+            arch: None,
+            capabilities: Vec::new(),
+            size_bytes: None,
+            size_vram_bytes: None,
+            expires_at: None,
+            remote_host: None,
+        }],
+        polled_at: chrono::Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn an_lm_studio_overflow_500_is_a_rejection_with_the_loaded_context() {
+    // LM Studio 0.4.25 answers an oversized /v1/messages prompt with 500 and a message that carries no
+    // numbers; the record keeps the real status and takes the context length from the model list.
+    const BODY: &str =
+        include_str!("../../../fixtures/lmstudio/v1-messages-500-context-overflow.json");
+    let mock = Router::new().route(
+        "/v1/messages",
+        post(|| async {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+                BODY,
+            )
+        }),
+    );
+    let mut proxy = spawn_proxy(
+        mock,
+        Options {
+            backend: Backend::LmStudio,
+            ..Default::default()
+        },
+    )
+    .await;
+    proxy
+        .ctx
+        .backends
+        .set(snapshot_with_loaded_model("laig-overflow-test", 2048))
+        .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/messages", proxy.url))
+        .body(r#"{"model":"laig-overflow-test","max_tokens":1,"messages":[]}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(resp.text().await.unwrap(), BODY);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.status, Some(500), "the status the client received");
+    assert_eq!(
+        record.outcome,
+        Outcome::Rejected {
+            input_tokens: None,
+            context_length: Some(2048)
+        }
+    );
+    assert_eq!(
+        record.outcome.summary().as_deref(),
+        Some("rejected (ctx 2048)")
+    );
+    assert!(
+        record
+            .error_summary
+            .as_deref()
+            .unwrap()
+            .starts_with("The number of tokens to keep")
+    );
+}
+
+#[tokio::test]
+async fn an_error_event_in_a_responses_stream_is_a_rejection_with_the_loaded_context() {
+    const STREAM: &str =
+        include_str!("../../../fixtures/lmstudio/v1-responses-sse-context-overflow.txt");
+    let mock = Router::new().route(
+        "/v1/responses",
+        post(|| async { ([(header::CONTENT_TYPE, "text/event-stream")], STREAM) }),
+    );
+    let mut proxy = spawn_proxy(
+        mock,
+        Options {
+            backend: Backend::LmStudio,
+            ..Default::default()
+        },
+    )
+    .await;
+    proxy
+        .ctx
+        .backends
+        .set(snapshot_with_loaded_model("laig-overflow-test", 2048))
+        .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/responses", proxy.url))
+        .body(
+            r#"{"model":"laig-overflow-test","input":"hello","max_output_tokens":1,"stream":true}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "the status was already sent"
+    );
+    assert_eq!(
+        resp.text().await.unwrap(),
+        STREAM,
+        "bytes pass through untouched"
+    );
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.status, Some(200));
+    assert_eq!(
+        record.outcome,
+        Outcome::Rejected {
+            input_tokens: None,
+            context_length: Some(2048)
+        }
+    );
+    assert!(
+        record
+            .error_summary
+            .as_deref()
+            .unwrap()
+            .starts_with("The number of tokens to keep")
     );
 }
 

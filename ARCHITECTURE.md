@@ -134,20 +134,29 @@ configuration, engine and pricing through `Hot`, so a reload is visible to the n
 
 `fixtures/` holds real captures, never hand-edited: LM Studio 0.4.25 (MLX engine, `qwen/qwen3.6-27b`) and
 Ollama 0.40.6 (`gemma4:12b-mlx`) answering every inference format with a tiny `max_tokens`, plus model lists,
-an `ioreg` dump and three Ollama error bodies. What they settled: LM Studio sends a usage frame on
+an `ioreg` dump, three Ollama error bodies and eight LM Studio context-overflow refusals (a 6000-token prompt
+into a 2048-token context). What they settled: LM Studio sends a usage frame on
 `/v1/chat/completions` and `/api/v0/chat/completions` streams only when `stream_options.include_usage` is set
 (hence `rewrite_include_usage`, which now covers `LmStudioNative` too), puts `usage` on the last frame of
 completion streams unasked, carries engine `stats` only on non-streaming `/api/v0` objects, and reports zero
 prompt tokens for embeddings. Ollama splits an Anthropic prompt between `input_tokens` and
 `cache_read_input_tokens` (the parser sums them), streams thinking as `thinking_delta` / `thinking` /
 `response.reasoning_summary_text.delta`, and sends no usage on `/v1/completions` streams. Reasoning text from
-every format is part of the reassembled reply, so DLP sees it.
+every format is part of the reassembled reply, so DLP sees it. An oversized prompt is refused by LM Studio 0.4.25
+with the "tokens to keep from the initial prompt" wording and no numbers: 400 on `/v1/chat/completions`,
+`/v1/completions` and `/api/v0/chat/completions`, 500 on `/v1/messages` and `/v1/responses`, and an
+`event: error` frame inside a 200 stream for all three streaming formats (the Responses stream also sends
+`response.failed`). The pipeline treats any error status or error frame whose message parses as an overflow
+as `rejected`, records the status the client received, and takes the context length from the latest model
+list when the message has none.
 
 ## Known gaps
 
-- A context-overflow 400 from LM Studio has not been captured: the loaded context was the model's full
-  262k tokens. `rejection.rs` is tested against the wordings the terminal monitors recorded (MLX and llama.cpp).
-- An error inside a 2xx stream is recorded as `failed` with the 200 status the client already received.
+- A rejected record from LM Studio 0.4.25 has no `input_tokens`, and its `context_length` is a lookup in the
+  latest model list, so it is `None` when the model was unloaded before the next poll. The llama.cpp wording
+  with numbers, from the terminal monitors' logs, is kept for `llmster`.
+- An error inside a 2xx stream is recorded as `failed` or `rejected` with the 200 status the client already
+  received.
 - Open streams that outlive the shutdown grace are cut without a `client_aborted` record.
 - Response-side DLP is a single scan of the reassembled text at the end; findings mid-stream and stopping a
   stream on a finding are not implemented.

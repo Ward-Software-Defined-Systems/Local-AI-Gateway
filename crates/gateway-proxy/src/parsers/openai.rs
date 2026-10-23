@@ -491,6 +491,24 @@ mod tests {
     }
 
     #[test]
+    fn fixture_lmstudio_chat_stream_overflow_is_an_error_event() {
+        // A 200 stream whose only frame is `event: error`; LM Studio 0.4.25 refusing an oversized prompt.
+        let body = include_bytes!("../../../../fixtures/lmstudio/v1-chat-sse-context-overflow.txt");
+        let parsed = parse_all(Box::new(OpenAiParser::new(Flavor::Chat, true)), body, 32).unwrap();
+        let message = parsed.in_stream_error.as_deref().unwrap();
+        assert!(
+            message.starts_with("The number of tokens to keep"),
+            "{message}"
+        );
+        assert_eq!(
+            crate::rejection::parse_overflow(message),
+            Some((None, None))
+        );
+        assert_eq!(parsed.stop_reason, None);
+        assert!(parsed.text.is_empty());
+    }
+
+    #[test]
     fn completions_text_and_lm_studio_stats_are_read() {
         let body = b"data: {\"model\":\"m\",\"choices\":[{\"text\":\"The\",\"index\":0}]}\n\ndata: {\"choices\":[{\"text\":\" end\",\"finish_reason\":\"stop\"}]}\n\n";
         let parsed = parse_all(
