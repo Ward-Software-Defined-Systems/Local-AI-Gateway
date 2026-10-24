@@ -23,7 +23,10 @@ use gateway_core::types::{
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use crate::listener::{CapturePolicy, ListenerConfig, ProxyContext, bind, serve};
+use crate::listener::{
+    BackendUpstream, CapturePolicy, ListenerConfig, ListenerMode, ProxyContext, TargetFlags, bind,
+    serve,
+};
 use crate::scan::{Decision, RequestScanner, ScanContext, ScanOutcome};
 
 const OLLAMA_STREAM: &str = include_str!("../../../fixtures/ollama/ollama-chat-stream.jsonl");
@@ -88,12 +91,16 @@ fn start_proxy(upstream: String, opts: Options) -> TestProxy {
         ctx.set_scanner(scanner);
     }
     let config = Arc::new(ListenerConfig {
-        backend: opts.backend,
         listen: listener.local_addr().unwrap(),
-        upstream,
-        capture_bodies: opts.capture_bodies,
-        record_passthrough: opts.record_passthrough,
-        rewrite_include_usage: opts.rewrite_include_usage,
+        mode: ListenerMode::Fixed(BackendUpstream {
+            backend: opts.backend,
+            upstream,
+            flags: TargetFlags {
+                capture_bodies: opts.capture_bodies,
+                record_passthrough: opts.record_passthrough,
+                rewrite_include_usage: opts.rewrite_include_usage,
+            },
+        }),
     });
     tokio::spawn(serve(listener, config, ctx.clone(), shutdown_rx));
     TestProxy {
@@ -537,6 +544,135 @@ async fn an_error_frame_inside_an_open_stream_is_a_rejection_too() {
             .unwrap()
             .starts_with("Input does not fit")
     );
+}
+
+#[tokio::test]
+async fn response_bytes_are_counted_when_bodies_are_not_captured() {
+    let mock = Router::new().route(
+        "/api/chat",
+        post(|| async {
+            (
+                [(header::CONTENT_TYPE, "application/x-ndjson")],
+                OLLAMA_STREAM,
+            )
+        }),
+    );
+    let mut proxy = spawn_proxy(
+        mock,
+        Options {
+            capture_bodies: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/chat", proxy.url))
+        .body(r#"{"model":"qwen3:14b","messages":[{"role":"user","content":"hi"}]}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.text().await.unwrap(), OLLAMA_STREAM);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.outcome, Outcome::Completed);
+    assert_eq!(record.response_bytes, OLLAMA_STREAM.len() as u64);
+    assert_eq!(record.routed_by.as_deref(), Some("listener"));
+    assert!(
+        record.gen_tokens.unwrap() > 0,
+        "the parser still saw the stream"
+    );
+}
+
+/// A fixed listener for a cloud provider: the record is cloud egress, credentials in the query are stored
+/// redacted while the upstream still receives them, and a redirect is handed to the client unfollowed.
+#[tokio::test]
+async fn a_cloud_listener_redacts_the_key_query_and_passes_redirects_through() {
+    use axum::extract::RawQuery;
+    use std::sync::Mutex;
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let seen2 = seen.clone();
+    let mock = Router::new()
+        .route(
+            "/v1beta/models",
+            get(move |RawQuery(q): RawQuery| {
+                let seen = seen2.clone();
+                async move {
+                    seen.lock().unwrap().push(q.unwrap_or_default());
+                    (
+                        [(header::CONTENT_TYPE, "application/json")],
+                        r#"{"models":[]}"#,
+                    )
+                }
+            }),
+        )
+        .route(
+            "/v1/chat/completions",
+            post(|| async {
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [(
+                        header::LOCATION,
+                        "https://elsewhere.example/v1/chat/completions",
+                    )],
+                    "",
+                )
+            }),
+        );
+    let mut proxy = spawn_proxy(
+        mock,
+        Options {
+            backend: Backend::Gemini,
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let resp = client
+        .get(format!(
+            "{}/v1beta/models?key=AIzaSECRET&pageSize=5",
+            proxy.url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.backend, Backend::Gemini);
+    assert!(
+        record.is_cloud,
+        "every request to a cloud provider is egress"
+    );
+    assert_eq!(record.api_format, ApiFormat::Passthrough);
+    assert_eq!(record.query.as_deref(), Some("key=[REDACTED]&pageSize=5"));
+    assert_eq!(
+        seen.lock().unwrap().as_slice(),
+        ["key=AIzaSECRET&pageSize=5"],
+        "the upstream received the raw query"
+    );
+
+    let resp = client
+        .post(format!("{}/v1/chat/completions", proxy.url))
+        .body(r#"{"model":"gemini-3-flash","messages":[]}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        resp.headers().get(header::LOCATION).unwrap(),
+        "https://elsewhere.example/v1/chat/completions"
+    );
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(
+        record.outcome,
+        Outcome::Failed {
+            status: 307,
+            source: FailureSource::Upstream
+        }
+    );
+    assert_eq!(record.status, Some(307));
+    assert!(record.is_cloud);
 }
 
 /// What the LM Studio poller publishes for a loaded model: enough for the context-length fallback.

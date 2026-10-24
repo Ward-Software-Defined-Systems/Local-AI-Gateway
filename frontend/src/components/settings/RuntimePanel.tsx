@@ -36,8 +36,17 @@ export default function RuntimePanel() {
           ) : (
             <ul>
               {s.listeners.map((l) => (
-                <li key={`${l.backend}-${l.listen}`}>
-                  {l.listen} → {l.upstream} <span className="text-zinc-500">({BACKEND_NAMES[l.backend]})</span>
+                <li key={l.listen}>
+                  {l.listen} →{' '}
+                  {l.unified ? (
+                    <>
+                      unified <span className="text-zinc-500">(routes to {l.targets.map((b) => BACKEND_NAMES[b]).join(', ')})</span>
+                    </>
+                  ) : (
+                    <>
+                      {l.upstream} <span className="text-zinc-500">({l.backend ? BACKEND_NAMES[l.backend] : '?'})</span>
+                    </>
+                  )}
                 </li>
               ))}
             </ul>

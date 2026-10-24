@@ -8,7 +8,6 @@ use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
-use chrono::Utc;
 use gateway_core::types::{FailureSource, Outcome, RequestKind};
 use hyper_util::rt::TokioIo;
 use tracing::{debug, warn};
@@ -21,7 +20,7 @@ pub async fn handle(st: ProxyState, meta: RequestMeta, mut req: Request) -> Resp
     // Taken before the request is consumed: this is the handle hyper resolves once the 101 is sent.
     let on_client = hyper::upgrade::on(&mut req);
     let (parts, _body) = req.into_parts();
-    let url = format!("{}{}", st.listener.upstream, meta.path_and_query());
+    let url = meta.upstream_url();
     let mut headers = HeaderMap::new();
     for (name, value) in &parts.headers {
         // The handshake headers are hop-by-hop in general but are exactly what the upstream needs here.
@@ -39,7 +38,7 @@ pub async fn handle(st: ProxyState, meta: RequestMeta, mut req: Request) -> Resp
     );
     let upstream = match st
         .ctx
-        .client
+        .client_for(meta.backend)
         .request(parts.method.clone(), &url)
         .headers(headers)
         .send()
@@ -47,7 +46,7 @@ pub async fn handle(st: ProxyState, meta: RequestMeta, mut req: Request) -> Resp
     {
         Ok(resp) => resp,
         Err(err) => {
-            warn!(request = %meta.id, error = %err, "upgrade handshake to upstream failed");
+            warn!(request = %meta.id, error = %err.without_url(), "upgrade handshake to upstream failed");
             let st2 = st.clone();
             let meta2 = meta.clone();
             tokio::spawn(async move {
@@ -136,6 +135,7 @@ pub async fn handle(st: ProxyState, meta: RequestMeta, mut req: Request) -> Resp
                 }
             }
             (Err(err), _) => {
+                let err = err.without_url();
                 warn!(request = %meta2.id, error = %err, "upstream upgrade failed after 101");
                 (
                     Some(502),
@@ -163,6 +163,5 @@ pub async fn handle(st: ProxyState, meta: RequestMeta, mut req: Request) -> Resp
         )
         .await;
     });
-    let _ = Utc::now();
     response
 }

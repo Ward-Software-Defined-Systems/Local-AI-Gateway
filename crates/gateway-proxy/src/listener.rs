@@ -1,8 +1,9 @@
-//! One axum server per configured listen address, each bound to one backend. `bind` claims the socket
-//! before the runtime exists so a taken port stops startup; `serve` runs the pipeline as a catch-all
-//! handler with graceful shutdown. `ProxyContext` is what every listener shares: the upstream HTTP client,
-//! the store and event bus, the DLP scanner, the capture policy, pricing, the backend snapshots and the
-//! in-flight table.
+//! One axum server per configured listen address. A fixed listener sends every request to one backend.
+//! `bind` claims the socket before the runtime exists so a taken port stops startup; `serve` runs the
+//! pipeline as a catch-all handler with graceful shutdown. `ProxyContext` is what every listener shares:
+//! the upstream HTTP clients (one follows redirects for the local servers, one refuses them for the cloud
+//! providers so a credential never follows a redirect to another host), the store and event bus, the DLP
+//! scanner, the capture policy, pricing, the routing table, the backend snapshots and the in-flight table.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -15,6 +16,7 @@ use axum::routing::any;
 use gateway_core::config::{BackendConfig, CaptureConfig};
 use gateway_core::events::EventSender;
 use gateway_core::pricing::PricingTable;
+use gateway_core::routing::RoutingTable;
 use gateway_core::state::BackendsState;
 use gateway_core::store::StoreHandle;
 use gateway_core::types::{Backend, InflightRequest};
@@ -26,19 +28,52 @@ use uuid::Uuid;
 
 use crate::scan::{NoopScanner, RequestScanner};
 
-#[derive(Debug, Clone)]
-pub struct ListenerConfig {
-    pub backend: Backend,
-    pub listen: SocketAddr,
-    /// `http://host:port`, no trailing slash.
-    pub upstream: String,
+/// Per-target behaviour, from the backend's `[backends.<name>]` table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetFlags {
     pub capture_bodies: bool,
     pub record_passthrough: bool,
     pub rewrite_include_usage: bool,
 }
 
+/// One backend as a listener reaches it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendUpstream {
+    pub backend: Backend,
+    /// `http://host:port` or `https://host`, no trailing slash.
+    pub upstream: String,
+    pub flags: TargetFlags,
+}
+
+impl BackendUpstream {
+    pub fn from_config(backend: Backend, cfg: &BackendConfig) -> Self {
+        Self {
+            backend,
+            upstream: cfg.upstream.trim_end_matches('/').to_string(),
+            flags: TargetFlags {
+                capture_bodies: cfg.capture_bodies,
+                record_passthrough: cfg.record_passthrough,
+                rewrite_include_usage: cfg.rewrite_include_usage,
+            },
+        }
+    }
+}
+
+/// How a listener picks the backend for a request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListenerMode {
+    /// Every request goes to this one backend.
+    Fixed(BackendUpstream),
+}
+
+#[derive(Debug, Clone)]
+pub struct ListenerConfig {
+    pub listen: SocketAddr,
+    pub mode: ListenerMode,
+}
+
 impl ListenerConfig {
-    /// One listener per configured address of an enabled backend.
+    /// One fixed listener per configured address of an enabled backend.
     pub fn from_backend(backend: Backend, cfg: &BackendConfig) -> Vec<ListenerConfig> {
         if !cfg.enabled {
             return Vec::new();
@@ -46,14 +81,28 @@ impl ListenerConfig {
         cfg.listen
             .iter()
             .map(|listen| ListenerConfig {
-                backend,
                 listen: *listen,
-                upstream: cfg.upstream.trim_end_matches('/').to_string(),
-                capture_bodies: cfg.capture_bodies,
-                record_passthrough: cfg.record_passthrough,
-                rewrite_include_usage: cfg.rewrite_include_usage,
+                mode: ListenerMode::Fixed(BackendUpstream::from_config(backend, cfg)),
             })
             .collect()
+    }
+
+    /// The one backend a fixed listener serves.
+    pub fn fixed(&self) -> Option<&BackendUpstream> {
+        let ListenerMode::Fixed(target) = &self.mode;
+        Some(target)
+    }
+
+    /// Every backend this listener can send a request to.
+    pub fn backends(&self) -> Vec<Backend> {
+        let ListenerMode::Fixed(target) = &self.mode;
+        vec![target.backend]
+    }
+
+    /// A line for the startup log.
+    pub fn summary(&self) -> String {
+        let ListenerMode::Fixed(target) = &self.mode;
+        format!("{} → {}", target.backend, target.upstream)
     }
 }
 
@@ -74,12 +123,17 @@ impl From<&CaptureConfig> for CapturePolicy {
 }
 
 pub struct ProxyContext {
+    /// For the local servers: follows redirects (Ollama answers `/api/chat/` with a 307).
     pub client: reqwest::Client,
+    /// For the cloud providers: a redirect is passed to the client instead of being followed, because
+    /// reqwest would carry `x-api-key` and `x-goog-api-key` to the new host.
+    pub cloud_client: reqwest::Client,
     pub store: Option<StoreHandle>,
     pub events: EventSender,
     scanner: RwLock<Arc<dyn RequestScanner>>,
     capture: RwLock<CapturePolicy>,
     pricing: RwLock<Arc<PricingTable>>,
+    routing: RwLock<Arc<RoutingTable>>,
     pub session_id: i64,
     pub backends: Arc<BackendsState>,
     inflight: Mutex<BTreeMap<Uuid, InflightRequest>>,
@@ -98,24 +152,53 @@ impl ProxyContext {
     ) -> Result<Arc<Self>> {
         // No overall timeout: a long generation is legitimate. No decompression: bytes reach the client
         // exactly as the backend sent them.
-        let client = reqwest::Client::builder()
-            .pool_idle_timeout(Duration::from_secs(90))
-            .connect_timeout(Duration::from_secs(5))
-            .tcp_nodelay(true)
+        let builder = || {
+            reqwest::Client::builder()
+                .pool_idle_timeout(Duration::from_secs(90))
+                .connect_timeout(Duration::from_secs(5))
+                .tcp_nodelay(true)
+        };
+        let client = builder().build().context("build proxy http client")?;
+        let cloud_client = builder()
+            .redirect(reqwest::redirect::Policy::none())
             .build()
-            .context("build proxy http client")?;
+            .context("build cloud http client")?;
         Ok(Arc::new(Self {
             client,
+            cloud_client,
             store,
             events,
             scanner: RwLock::new(Arc::new(NoopScanner)),
             capture: RwLock::new(capture),
             pricing: RwLock::new(pricing),
+            routing: RwLock::new(Arc::new(RoutingTable::default())),
             session_id,
             backends,
             inflight: Mutex::new(BTreeMap::new()),
             tunnels: TaskTracker::new(),
         }))
+    }
+
+    /// The HTTP client for a backend: redirects are followed for the local servers only.
+    pub fn client_for(&self, backend: Backend) -> &reqwest::Client {
+        if backend.is_cloud_provider() {
+            &self.cloud_client
+        } else {
+            &self.client
+        }
+    }
+
+    pub fn routing(&self) -> Arc<RoutingTable> {
+        self.routing
+            .read()
+            .map(|r| r.clone())
+            .unwrap_or_else(|_| Arc::new(RoutingTable::default()))
+    }
+
+    pub fn set_routing(&self, table: Arc<RoutingTable>) {
+        if let Ok(mut slot) = self.routing.write() {
+            *slot = table;
+        }
     }
 
     pub fn scanner(&self) -> Arc<dyn RequestScanner> {
@@ -207,7 +290,7 @@ pub async fn serve(
 ) -> Result<()> {
     let listener = TcpListener::from_std(listener).context("register proxy listener")?;
     let addr = listener.local_addr().context("proxy listener address")?;
-    info!(backend = %config.backend, listen = %addr, upstream = %config.upstream, "proxy listener ready");
+    info!(listen = %addr, target = %config.summary(), "proxy listener ready");
     let app = Router::new()
         .fallback(any(crate::pipeline::handle))
         .with_state(ProxyState {
@@ -239,13 +322,46 @@ mod tests {
         cfg.upstream = "http://127.0.0.1:11400/".into();
         let listeners = ListenerConfig::from_backend(Backend::Ollama, &cfg);
         assert_eq!(listeners.len(), 2);
+        let target = listeners[0].fixed().expect("a fixed listener");
         assert_eq!(
-            listeners[0].upstream, "http://127.0.0.1:11400",
+            target.upstream, "http://127.0.0.1:11400",
             "trailing slash trimmed"
         );
+        assert_eq!(target.backend, Backend::Ollama);
+        assert!(target.flags.capture_bodies);
         assert_eq!(listeners[1].listen.port(), 11435);
+        assert_eq!(listeners[1].backends(), vec![Backend::Ollama]);
+        assert_eq!(listeners[1].summary(), "ollama → http://127.0.0.1:11400");
         cfg.enabled = false;
         assert!(ListenerConfig::from_backend(Backend::Ollama, &cfg).is_empty());
+    }
+
+    #[test]
+    fn the_cloud_client_does_not_follow_redirects_and_the_local_one_does() {
+        let (events, _rx) = gateway_core::events::channel();
+        let ctx = ProxyContext::new(
+            None,
+            events,
+            1,
+            Arc::new(PricingTable::baked()),
+            Arc::new(BackendsState::new()),
+            CapturePolicy {
+                max_body_bytes: 1,
+                max_buffered_request_bytes: 1,
+            },
+        )
+        .unwrap();
+        assert!(std::ptr::eq(ctx.client_for(Backend::Ollama), &ctx.client));
+        assert!(std::ptr::eq(
+            ctx.client_for(Backend::Anthropic),
+            &ctx.cloud_client
+        ));
+        assert_eq!(ctx.routing().default_backend, Backend::LmStudio);
+        ctx.set_routing(Arc::new(RoutingTable {
+            default_backend: Backend::Ollama,
+            ..RoutingTable::default()
+        }));
+        assert_eq!(ctx.routing().default_backend, Backend::Ollama);
     }
 
     #[test]

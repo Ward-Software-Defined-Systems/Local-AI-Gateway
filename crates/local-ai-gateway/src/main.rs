@@ -27,6 +27,7 @@ use gateway_core::config::{Config, IssueLevel, SAMPLE};
 use gateway_core::events::{self, EventSender, GatewayEvent, publish};
 use gateway_core::paths::Paths;
 use gateway_core::pricing::PricingTable;
+use gateway_core::routing::RoutingTable;
 use gateway_core::state::BackendsState;
 use gateway_core::store::{Store, StoreHandle};
 use gateway_core::types::Platform;
@@ -277,6 +278,7 @@ async fn serve_all(startup: Startup) -> Result<()> {
         warn!(message = %issue.message, "dlp warning");
     }
     proxy_ctx.set_scanner(Arc::new(dlp::DlpScanner::new(engine.clone())));
+    proxy_ctx.set_routing(Arc::new(RoutingTable::from_config(&config.unified)));
     info!(
         enabled = engine.is_enabled(),
         rules = engine.rules().iter().filter(|r| r.enabled).count(),
@@ -309,10 +311,13 @@ async fn serve_all(startup: Startup) -> Result<()> {
     let mut listener_statuses = Vec::new();
     let mut proxy_tasks: Vec<JoinHandle<Result<()>>> = Vec::new();
     for (listener, socket) in proxy_listeners {
+        let fixed = listener.fixed();
         listener_statuses.push(ListenerStatus {
-            backend: listener.backend,
             listen: listener.listen,
-            upstream: listener.upstream.clone(),
+            unified: fixed.is_none(),
+            backend: fixed.map(|t| t.backend),
+            upstream: fixed.map(|t| t.upstream.clone()),
+            targets: listener.backends(),
             bound: true,
         });
         proxy_tasks.push(tokio::spawn(gateway_proxy::serve(

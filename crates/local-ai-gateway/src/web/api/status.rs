@@ -14,9 +14,14 @@ use crate::web::AppState;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ListenerStatus {
-    pub backend: Backend,
     pub listen: SocketAddr,
-    pub upstream: String,
+    /// `true` for the unified listener, which picks the backend per request.
+    pub unified: bool,
+    /// The one backend of a fixed listener.
+    pub backend: Option<Backend>,
+    pub upstream: Option<String>,
+    /// Every backend the listener can send a request to.
+    pub targets: Vec<Backend>,
     pub bound: bool,
 }
 

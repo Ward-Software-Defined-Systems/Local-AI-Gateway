@@ -17,7 +17,10 @@ pub mod router;
 pub mod scan;
 pub mod tunnel;
 
-pub use listener::{CapturePolicy, ListenerConfig, ProxyContext, ProxyState, bind, serve};
+pub use listener::{
+    BackendUpstream, CapturePolicy, ListenerConfig, ListenerMode, ProxyContext, ProxyState,
+    TargetFlags, bind, serve,
+};
 pub use scan::{Decision, NoopScanner, RequestScanner, ScanContext, ScanOutcome};
 
 #[cfg(test)]

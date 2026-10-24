@@ -21,9 +21,10 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_util::{Stream, StreamExt};
 use gateway_core::events::{GatewayEvent, publish};
+use gateway_core::routing::RoutedBy;
 use gateway_core::types::{
     ApiFormat, Backend, Body as StoredBody, Direction, FailureSource, Finding, InflightRequest,
-    ModelInfo, Outcome, RequestKind, RequestRecord, Severity,
+    ModelInfo, Outcome, RequestKind, RequestRecord,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -32,7 +33,7 @@ use uuid::Uuid;
 use crate::capture::{BodyCapture, Timeline};
 use crate::error::ProxyError;
 use crate::http;
-use crate::listener::ProxyState;
+use crate::listener::{ListenerMode, ProxyState, TargetFlags};
 use crate::parsers::{self, StreamParser, WallClock};
 use crate::rejection;
 use crate::router;
@@ -46,18 +47,28 @@ const ERROR_BODY_CAP: usize = 64 * 1024;
 /// The channel between the driver task and the client body: its bound is the backpressure.
 const CLIENT_CHANNEL: usize = 64;
 
-/// Everything known about a request before its response.
+/// Everything known about a request before its response, including the target it goes to.
 #[derive(Debug, Clone)]
 pub struct RequestMeta {
     pub id: Uuid,
     pub backend: Backend,
+    /// The target's base URL, `http://host:port` or `https://host`, no trailing slash.
+    pub upstream: String,
+    pub flags: TargetFlags,
+    pub routed_by: RoutedBy,
     pub listener: String,
     pub client_ip: String,
     pub user_agent: Option<String>,
     pub client_request_id: Option<String>,
     pub method: String,
+    /// The path the client sent, as recorded.
     pub path: String,
+    /// The path sent upstream.
+    pub forward_path: String,
+    /// The query as the client sent it: used for the upstream URL only.
     pub query: Option<String>,
+    /// The query as stored, shown and logged: credential parameters redacted.
+    pub stored_query: Option<String>,
     pub api_format: ApiFormat,
     pub started: Instant,
     pub started_at: DateTime<Utc>,
@@ -78,33 +89,48 @@ impl RequestMeta {
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string)
         };
+        let ListenerMode::Fixed(target) = &st.listener.mode;
+        let path = req.uri().path().to_string();
+        let query = req.uri().query().map(str::to_string);
         Self {
             id: Uuid::now_v7(),
-            backend: st.listener.backend,
+            backend: target.backend,
+            upstream: target.upstream.clone(),
+            flags: target.flags,
+            routed_by: RoutedBy::Listener,
             listener: st.listener.listen.to_string(),
             client_ip: addr.ip().to_string(),
             user_agent: header_str("user-agent"),
             client_request_id: header_str("x-request-id"),
             method: req.method().to_string(),
-            path: req.uri().path().to_string(),
-            query: req.uri().query().map(str::to_string),
-            api_format: router::classify(st.listener.backend, req.method(), req.uri().path()),
+            api_format: router::classify(target.backend, req.method(), &path),
+            forward_path: path.clone(),
+            path,
+            stored_query: query.as_deref().map(http::redact_query),
+            query,
             started: Instant::now(),
             started_at: Utc::now(),
             request_headers: http::redact_headers(headers),
             request_content_type: header_str("content-type"),
             request_bytes: 0,
             model_requested: None,
-            is_cloud: false,
+            // A cloud provider's traffic leaves the machine whatever the model; Ollama's `:cloud` models are
+            // recognised once the body names one.
+            is_cloud: target.backend.is_cloud_provider(),
             streamed: false,
         }
     }
 
+    /// The path and raw query sent upstream.
     pub fn path_and_query(&self) -> String {
         match &self.query {
-            Some(q) => format!("{}?{q}", self.path),
-            None => self.path.clone(),
+            Some(q) => format!("{}?{q}", self.forward_path),
+            None => self.forward_path.clone(),
         }
+    }
+
+    pub fn upstream_url(&self) -> String {
+        format!("{}{}", self.upstream, self.path_and_query())
     }
 
     fn inflight(&self, kind: RequestKind) -> InflightRequest {
@@ -167,13 +193,13 @@ async fn passthrough(st: ProxyState, meta: RequestMeta, req: Request) -> Respons
     } else {
         reqwest::Body::from(Bytes::new())
     };
-    let url = format!("{}{}", st.listener.upstream, meta.path_and_query());
+    let url = meta.upstream_url();
     // A streamed body is forwarded unchanged, so its declared length still holds.
     let mut headers = http::forwardable(&parts.headers, !streamed);
     headers.insert("x-request-id", request_id_value(meta.id));
     let upstream = match st
         .ctx
-        .client
+        .client_for(meta.backend)
         .request(parts.method.clone(), &url)
         .headers(headers)
         .body(upstream_body)
@@ -182,9 +208,9 @@ async fn passthrough(st: ProxyState, meta: RequestMeta, req: Request) -> Respons
     {
         Ok(resp) => resp,
         Err(err) => {
-            warn!(request = %meta.id, %url, error = %err, "upstream request failed");
+            warn!(request = %meta.id, url = %http::redact_url(&url), error = %err.without_url(), "upstream request failed");
             let err = ProxyError::UpstreamUnreachable;
-            if st.listener.record_passthrough {
+            if meta.flags.record_passthrough {
                 finish_simple(
                     &st,
                     meta.clone(),
@@ -206,7 +232,7 @@ async fn passthrough(st: ProxyState, meta: RequestMeta, req: Request) -> Respons
     };
     let status = upstream.status();
     let resp_headers = upstream.headers().clone();
-    let record = st.listener.record_passthrough;
+    let record = meta.flags.record_passthrough;
     let st2 = st.clone();
     let meta2 = meta.clone();
     let tracked = Tracked::new(
@@ -280,7 +306,7 @@ impl Stream for Tracked {
                 Poll::Ready(Some(Ok(bytes)))
             }
             Poll::Ready(Some(Err(err))) => {
-                warn!(error = %err, "upstream stream error mid-response (passthrough)");
+                warn!(error = %err.without_url(), "upstream stream error mid-response (passthrough)");
                 self.end(false);
                 Poll::Ready(None)
             }
@@ -318,13 +344,14 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
     let fields = http::request_fields(meta.api_format, &body);
     meta.model_requested = fields.model.clone();
     meta.streamed = fields.streamed;
-    meta.is_cloud = match (&meta.model_requested, meta.backend) {
-        (Some(model), Backend::Ollama) => {
-            gateway_backends::ollama::is_cloud_name(model)
-                || st.ctx.backends.is_cloud_model(Backend::Ollama, model).await
-        }
-        _ => false,
-    };
+    meta.is_cloud = meta.backend.is_cloud_provider()
+        || match (&meta.model_requested, meta.backend) {
+            (Some(model), Backend::Ollama) => {
+                gateway_backends::ollama::is_cloud_name(model)
+                    || st.ctx.backends.is_cloud_model(Backend::Ollama, model).await
+            }
+            _ => false,
+        };
     st.ctx.inflight_insert(meta.inflight(RequestKind::Http));
     publish(
         &st.ctx.events,
@@ -342,8 +369,8 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
         direction: Direction::Request,
     };
     let scan = st.ctx.scanner().scan_request(&scan_ctx, &body);
-    let stored_request = st
-        .listener
+    let stored_request = meta
+        .flags
         .capture_bodies
         .then(|| match scan.redacted.clone() {
             Some(redacted) => (redacted, true),
@@ -373,7 +400,7 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
         return response;
     }
 
-    let forward_body = if st.listener.rewrite_include_usage
+    let forward_body = if meta.flags.rewrite_include_usage
         && matches!(
             meta.api_format,
             ApiFormat::OpenAiChat | ApiFormat::OpenAiCompletions | ApiFormat::LmStudioNative
@@ -384,12 +411,12 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
     } else {
         body.clone()
     };
-    let url = format!("{}{}", st.listener.upstream, meta.path_and_query());
+    let url = meta.upstream_url();
     let mut headers = http::forwardable(&parts.headers, true);
     headers.insert("x-request-id", request_id_value(meta.id));
     let upstream = match st
         .ctx
-        .client
+        .client_for(meta.backend)
         .request(parts.method.clone(), &url)
         .headers(headers)
         .body(forward_body)
@@ -398,7 +425,7 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
     {
         Ok(resp) => resp,
         Err(err) => {
-            warn!(request = %meta.id, %url, error = %err, "upstream request failed");
+            warn!(request = %meta.id, url = %http::redact_url(&url), error = %err.without_url(), "upstream request failed");
             return fail_gateway(
                 &st,
                 meta,
@@ -416,7 +443,9 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
-    if status.is_client_error() || status.is_server_error() {
+    // A redirect only reaches here from a cloud provider (the local client follows them); it is passed
+    // through like an error, Location header and all, so the client decides whether to follow it.
+    if !status.is_success() {
         let error_body = collect_capped(upstream.bytes_stream(), ERROR_BODY_CAP).await;
         let summary = rejection::error_summary(&error_body);
         // LM Studio refuses an oversized prompt with 400 on its chat and completion routes and 500 on
@@ -439,7 +468,7 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
                 source: FailureSource::Upstream,
             },
         };
-        let stored_response = st.listener.capture_bodies.then(|| StoredBody {
+        let stored_response = meta.flags.capture_bodies.then(|| StoredBody {
             request_id: meta.id,
             direction: Direction::Response,
             content_type: content_type.clone(),
@@ -470,6 +499,7 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
     let parser = parsers::select(meta.api_format, content_type.as_deref(), fields.streamed);
     let body = match parser {
         Some(parser) => {
+            let capture_bodies = meta.flags.capture_bodies;
             let finisher = Finisher {
                 st: st.clone(),
                 meta: meta.clone(),
@@ -479,9 +509,14 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
                 stored_request,
                 request_findings: scan.findings,
                 parser,
-                capture: BodyCapture::new(policy.max_body_bytes),
+                // A zero cap keeps nothing but still counts every byte for `response_bytes`.
+                capture: BodyCapture::new(if capture_bodies {
+                    policy.max_body_bytes
+                } else {
+                    0
+                }),
                 timeline: Timeline::new(meta.started),
-                capture_bodies: st.listener.capture_bodies,
+                capture_bodies,
             };
             drive(upstream.bytes_stream(), finisher)
         }
@@ -558,7 +593,7 @@ where
                             break StreamEnd::ClientGone;
                         }
                     }
-                    Some(Err(err)) => break StreamEnd::UpstreamError(err.to_string()),
+                    Some(Err(err)) => break StreamEnd::UpstreamError(err.without_url().to_string()),
                     None => break StreamEnd::UpstreamDone,
                 },
             }
@@ -590,18 +625,9 @@ impl Finisher {
         self.parser.push(bytes);
         // Incremental response scanning arrives with the DLP engine; the deltas are drained so they do not pile up.
         let _ = self.parser.take_text_deltas();
-        if self.capture_bodies {
-            self.capture.push(bytes);
-        } else {
-            let mut counter = BodyCapture::new(0);
-            counter.push(bytes);
-            self.capture.push(&[]);
-            self.capture_total_add(counter.total_bytes());
-        }
+        self.capture.push(bytes);
         self.timeline.push(at, bytes.len());
     }
-
-    fn capture_total_add(&mut self, _n: u64) {}
 
     async fn finish(self, end: StreamEnd, first_byte: Option<Instant>) {
         let Finisher {
@@ -736,29 +762,12 @@ impl Finisher {
         }
 
         let record = RequestRecord {
-            id: meta.id,
-            session_id: st.ctx.session_id,
-            backend: meta.backend,
-            listener: meta.listener.clone(),
-            kind,
-            client_ip: meta.client_ip.clone(),
-            user_agent: meta.user_agent.clone(),
-            client_request_id: meta.client_request_id.clone(),
-            method: meta.method.clone(),
-            path: meta.path.clone(),
-            query: meta.query.clone(),
-            api_format: meta.api_format,
-            streamed: meta.streamed,
-            model_requested: meta.model_requested.clone(),
             model_resolved,
-            is_cloud: meta.is_cloud,
-            started_at: meta.started_at,
             first_byte_at: first_byte.map(|t| {
                 meta.started_at
                     + chrono::Duration::from_std(t.saturating_duration_since(meta.started))
                         .unwrap_or_default()
             }),
-            ended_at: Utc::now(),
             status: Some(status),
             outcome,
             error_summary,
@@ -770,18 +779,61 @@ impl Finisher {
             tokens_per_sec: parsed.tokens_per_sec,
             timings_estimated: parsed.timings_estimated,
             stop_reason: parsed.stop_reason,
-            request_bytes: meta.request_bytes,
             response_bytes,
-            request_headers: meta.request_headers.clone(),
             response_headers,
             chunk_timeline: timeline.into_entries(),
             finding_count: findings.len() as u32,
             max_severity: findings.iter().map(|f| f.severity).max(),
             hypothetical_cost,
-            actual_cost_usd: None,
-            routed_by: None,
+            ..base_record(&st, &meta, kind)
         };
         complete(&st, record, bodies, findings).await;
+    }
+}
+
+/// A record carrying the request's metadata and neutral defaults; each finisher overrides what it knows.
+fn base_record(st: &ProxyState, meta: &RequestMeta, kind: RequestKind) -> RequestRecord {
+    RequestRecord {
+        id: meta.id,
+        session_id: st.ctx.session_id,
+        backend: meta.backend,
+        listener: meta.listener.clone(),
+        kind,
+        client_ip: meta.client_ip.clone(),
+        user_agent: meta.user_agent.clone(),
+        client_request_id: meta.client_request_id.clone(),
+        method: meta.method.clone(),
+        path: meta.path.clone(),
+        query: meta.stored_query.clone(),
+        api_format: meta.api_format,
+        streamed: meta.streamed,
+        model_requested: meta.model_requested.clone(),
+        model_resolved: meta.model_requested.clone(),
+        is_cloud: meta.is_cloud,
+        started_at: meta.started_at,
+        first_byte_at: None,
+        ended_at: Utc::now(),
+        status: None,
+        outcome: Outcome::Completed,
+        error_summary: None,
+        prompt_tokens: None,
+        gen_tokens: None,
+        tokens_estimated: false,
+        ttft_ms: None,
+        total_ms: meta.started.elapsed().as_secs_f64() * 1000.0,
+        tokens_per_sec: None,
+        timings_estimated: true,
+        stop_reason: None,
+        request_bytes: meta.request_bytes,
+        response_bytes: 0,
+        request_headers: meta.request_headers.clone(),
+        response_headers: Vec::new(),
+        chunk_timeline: Vec::new(),
+        finding_count: 0,
+        max_severity: None,
+        hypothetical_cost: Default::default(),
+        actual_cost_usd: None,
+        routed_by: Some(meta.routed_by.as_str().to_string()),
     }
 }
 
@@ -900,46 +952,13 @@ async fn finish_failed(
         .unwrap_or(0);
     bodies.extend(stored_response);
     let record = RequestRecord {
-        id: meta.id,
-        session_id: st.ctx.session_id,
-        backend: meta.backend,
-        listener: meta.listener.clone(),
-        kind: RequestKind::Http,
-        client_ip: meta.client_ip.clone(),
-        user_agent: meta.user_agent.clone(),
-        client_request_id: meta.client_request_id.clone(),
-        method: meta.method.clone(),
-        path: meta.path.clone(),
-        query: meta.query.clone(),
-        api_format: meta.api_format,
-        streamed: meta.streamed,
-        model_requested: meta.model_requested.clone(),
-        model_resolved: meta.model_requested.clone(),
-        is_cloud: meta.is_cloud,
-        started_at: meta.started_at,
-        first_byte_at: None,
-        ended_at: Utc::now(),
         status,
         outcome,
         error_summary,
-        prompt_tokens: None,
-        gen_tokens: None,
-        tokens_estimated: false,
-        ttft_ms: None,
-        total_ms: meta.started.elapsed().as_secs_f64() * 1000.0,
-        tokens_per_sec: None,
-        timings_estimated: true,
-        stop_reason: None,
-        request_bytes: meta.request_bytes,
         response_bytes,
-        request_headers: meta.request_headers.clone(),
-        response_headers: Vec::new(),
-        chunk_timeline: Vec::new(),
         finding_count: findings.len() as u32,
         max_severity: findings.iter().map(|f| f.severity).max(),
-        hypothetical_cost: Default::default(),
-        actual_cost_usd: None,
-        routed_by: None,
+        ..base_record(st, &meta, RequestKind::Http)
     };
     complete(st, record, bodies, findings).await;
 }
@@ -955,46 +974,15 @@ pub async fn finish_simple(
     response_bytes: u64,
 ) {
     let record = RequestRecord {
-        id: meta.id,
-        session_id: st.ctx.session_id,
-        backend: meta.backend,
-        listener: meta.listener.clone(),
-        kind,
-        client_ip: meta.client_ip.clone(),
-        user_agent: meta.user_agent.clone(),
-        client_request_id: meta.client_request_id.clone(),
-        method: meta.method.clone(),
-        path: meta.path.clone(),
-        query: meta.query.clone(),
         api_format: ApiFormat::Passthrough,
         streamed: false,
         model_requested: None,
         model_resolved: None,
-        is_cloud: false,
-        started_at: meta.started_at,
-        first_byte_at: None,
-        ended_at: Utc::now(),
         status,
         outcome,
         error_summary,
-        prompt_tokens: None,
-        gen_tokens: None,
-        tokens_estimated: false,
-        ttft_ms: None,
-        total_ms: meta.started.elapsed().as_secs_f64() * 1000.0,
-        tokens_per_sec: None,
-        timings_estimated: true,
-        stop_reason: None,
-        request_bytes: meta.request_bytes,
         response_bytes,
-        request_headers: meta.request_headers.clone(),
-        response_headers: Vec::new(),
-        chunk_timeline: Vec::new(),
-        finding_count: 0,
-        max_severity: None::<Severity>,
-        hypothetical_cost: Default::default(),
-        actual_cost_usd: None,
-        routed_by: None,
+        ..base_record(st, &meta, kind)
     };
     complete(st, record, Vec::new(), Vec::new()).await;
 }

@@ -165,9 +165,14 @@ export interface RollingMetrics {
 }
 
 export interface ListenerStatus {
-  backend: Backend
   listen: string
-  upstream: string
+  /** The unified listener picks the backend per request. */
+  unified: boolean
+  /** The one backend of a fixed listener. */
+  backend: Backend | null
+  upstream: string | null
+  /** Every backend the listener can send a request to. */
+  targets: Backend[]
   bound: boolean
 }
 

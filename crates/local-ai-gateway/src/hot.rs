@@ -12,6 +12,7 @@ use gateway_core::config::{Config, Issue, IssueLevel};
 use gateway_core::events::{EventSender, GatewayEvent, publish};
 use gateway_core::paths::Paths;
 use gateway_core::pricing::PricingTable;
+use gateway_core::routing::RoutingTable;
 use gateway_core::store::RetentionPolicy;
 use gateway_dlp::Engine;
 use gateway_proxy::{CapturePolicy, ProxyContext};
@@ -217,11 +218,15 @@ impl Hot {
         if engine.known_secret_count() != self.engine().known_secret_count() {
             applied.push("known_secrets".to_string());
         }
+        if current.unified.routing_part() != config.unified.routing_part() {
+            applied.push("unified".to_string());
+        }
 
         if let Some(proxy) = &self.proxy {
             proxy.set_scanner(Arc::new(DlpScanner::new(engine.clone())));
             proxy.set_capture(CapturePolicy::from(&config.capture));
             proxy.set_pricing(pricing.clone());
+            proxy.set_routing(Arc::new(RoutingTable::from_config(&config.unified)));
         }
         if let Ok(mut slot) = self.alert_settings.write() {
             *slot = AlertSettings::from_config(&config.alerts, &config.dlp, &self.paths);
@@ -354,11 +359,20 @@ mod tests {
         let before = hot.engine().rules().iter().filter(|r| r.enabled).count();
         let report = hot
             .save_and_apply(
-                "[dlp.rules.email]\nenabled = false\n[backends.ollama]\nlisten = [\"127.0.0.1:2\"]\n[capture]\nretention_days = 3\n",
+                "[dlp.rules.email]\nenabled = false\n[backends.ollama]\nlisten = [\"127.0.0.1:2\"]\n[capture]\nretention_days = 3\n\
+                 [unified]\nlisten = [\"127.0.0.1:3\"]\n[unified.aliases]\nfast = \"ollama/gemma4:12b-mlx\"\n",
             )
             .unwrap();
-        assert_eq!(report.applied, vec!["dlp", "capture"]);
-        assert_eq!(report.restart_required, vec!["backends.ollama"]);
+        assert_eq!(report.applied, vec!["dlp", "capture", "unified"]);
+        assert_eq!(
+            report.restart_required,
+            vec!["backends.ollama", "unified.listen"],
+            "the routing table reloads live; the address needs a restart"
+        );
+        assert_eq!(
+            hot.config().unified.aliases.get("fast").map(String::as_str),
+            Some("ollama/gemma4:12b-mlx")
+        );
         assert_eq!(report.rules_enabled, before - 1);
         assert_eq!(hot.retention().body_retention, chrono::Duration::days(3));
         assert!(dir.path().join("config.toml").exists());

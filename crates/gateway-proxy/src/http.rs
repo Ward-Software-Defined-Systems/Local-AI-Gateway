@@ -137,6 +137,42 @@ pub fn ensure_include_usage(body: Bytes) -> Bytes {
     }
 }
 
+/// Query parameters that carry a credential in some provider's API: Gemini takes its key as `?key=`.
+const SECRET_QUERY_KEYS: &[&str] = &[
+    "key",
+    "api_key",
+    "apikey",
+    "api-key",
+    "access_token",
+    "token",
+    "x-goog-api-key",
+];
+
+/// A query string as stored, shown and logged: the values of credential parameters replaced. The raw
+/// query still goes upstream.
+pub fn redact_query(query: &str) -> String {
+    query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((name, _))
+                if SECRET_QUERY_KEYS.contains(&name.trim().to_ascii_lowercase().as_str()) =>
+            {
+                format!("{name}=[REDACTED]")
+            }
+            _ => pair.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// A URL safe to log: its query redacted.
+pub fn redact_url(url: &str) -> String {
+    match url.split_once('?') {
+        Some((base, query)) => format!("{base}?{}", redact_query(query)),
+        None => url.to_string(),
+    }
+}
+
 /// Headers as stored on a record: values of credentials replaced, everything else as sent.
 pub fn redact_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     headers
@@ -145,7 +181,12 @@ pub fn redact_headers(headers: &HeaderMap) -> Vec<(String, String)> {
             let lower = name.as_str().to_ascii_lowercase();
             let shown = if matches!(
                 lower.as_str(),
-                "authorization" | "x-api-key" | "cookie" | "proxy-authorization" | "set-cookie"
+                "authorization"
+                    | "x-api-key"
+                    | "x-goog-api-key"
+                    | "cookie"
+                    | "proxy-authorization"
+                    | "set-cookie"
             ) {
                 "[REDACTED]".to_string()
             } else {
@@ -319,11 +360,41 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, "Bearer secret".parse().unwrap());
         headers.insert("x-api-key", "k".parse().unwrap());
+        headers.insert("X-Goog-Api-Key", "g".parse().unwrap());
         headers.insert(header::USER_AGENT, "curl/8".parse().unwrap());
         let stored = redact_headers(&headers);
         assert!(stored.contains(&("authorization".to_string(), "[REDACTED]".to_string())));
         assert!(stored.contains(&("x-api-key".to_string(), "[REDACTED]".to_string())));
+        assert!(stored.contains(&("x-goog-api-key".to_string(), "[REDACTED]".to_string())));
         assert!(stored.contains(&("user-agent".to_string(), "curl/8".to_string())));
+    }
+
+    #[test]
+    fn query_strings_and_urls_redact_credential_parameters() {
+        assert_eq!(
+            redact_query("alt=sse&key=AIzaSyA1234567890abcdefghijklmnopqrstuv"),
+            "alt=sse&key=[REDACTED]"
+        );
+        assert_eq!(
+            redact_query("KEY=x&api_key=y&token=z&q=hello"),
+            "KEY=[REDACTED]&api_key=[REDACTED]&token=[REDACTED]&q=hello"
+        );
+        assert_eq!(
+            redact_query("flag&key"),
+            "flag&key",
+            "a parameter without a value is kept"
+        );
+        assert_eq!(redact_query(""), "");
+        assert_eq!(
+            redact_url(
+                "https://generativelanguage.googleapis.com/v1beta/models?key=secret&pageSize=5"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/models?key=[REDACTED]&pageSize=5"
+        );
+        assert_eq!(
+            redact_url("http://127.0.0.1:1234/v1/models"),
+            "http://127.0.0.1:1234/v1/models"
+        );
     }
 
     #[test]
