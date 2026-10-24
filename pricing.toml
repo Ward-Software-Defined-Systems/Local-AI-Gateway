@@ -1,5 +1,11 @@
-# Hypothetical frontier-API pricing per 1M tokens, USD.
-# List prices, updated 2026-10-04; kept identical to lmstudio-monitor's table.
+# Frontier-API pricing per 1M tokens, USD. Two uses: the hypothetical cost of local traffic (the six
+# columns in gateway-core/src/pricing.rs FRONTIER_MODELS) and the real cost of requests the unified
+# listener sends to Anthropic, Gemini and OpenAI, priced by the longest key that prefixes the model id
+# (`claude-opus-5-5-20260101` → claude-opus-5-5, `gemini-3.1-pro-preview` → gemini-3-1-pro).
+# List prices from the providers' public pricing pages, updated 2026-10-24: flat rates, no cache, batch or
+# long-context tiers (Claude Haiku 5.5 and Gemini 3.1 Pro charge more past 100K / 200K prompt tokens, so
+# the figure is a lower bound there). Gemini 4 Argon is a promotional rate until 2026-11-30 (then 4.00 /
+# 20.00) and the Gemini 3.6 / 3.8 Flash models until 2026-12-31 (then 1.50 / 7.50).
 # Override in the user config file (location in README > Files), e.g. to use
 # Gemini's rate for prompts over 200K tokens:
 #   [pricing.providers.google.models.gemini-3-1-pro]
@@ -11,6 +17,14 @@ input_per_mtok_usd  = 10.00
 output_per_mtok_usd = 50.00
 
 [providers.anthropic.models.claude-fable-5]
+input_per_mtok_usd  = 10.00
+output_per_mtok_usd = 50.00
+
+[providers.anthropic.models.claude-mythos-5-1]
+input_per_mtok_usd  = 10.00
+output_per_mtok_usd = 50.00
+
+[providers.anthropic.models.claude-mythos-5]
 input_per_mtok_usd  = 10.00
 output_per_mtok_usd = 50.00
 
@@ -26,6 +40,234 @@ output_per_mtok_usd = 25.00
 input_per_mtok_usd  = 5.00
 output_per_mtok_usd = 25.00
 
+[providers.anthropic.models.claude-opus-4-7]
+input_per_mtok_usd  = 5.00
+output_per_mtok_usd = 25.00
+
+[providers.anthropic.models.claude-opus-4-6]
+input_per_mtok_usd  = 5.00
+output_per_mtok_usd = 25.00
+
+[providers.anthropic.models.claude-opus-4-5]
+input_per_mtok_usd  = 5.00
+output_per_mtok_usd = 25.00
+
+[providers.anthropic.models.claude-opus-4-1]
+input_per_mtok_usd  = 15.00
+output_per_mtok_usd = 75.00
+
+[providers.anthropic.models.claude-opus-4]
+input_per_mtok_usd  = 15.00
+output_per_mtok_usd = 75.00
+
+[providers.anthropic.models.claude-sonnet-5-5]
+input_per_mtok_usd  = 2.00
+output_per_mtok_usd = 10.00
+
+[providers.anthropic.models.claude-sonnet-5]
+input_per_mtok_usd  = 2.00
+output_per_mtok_usd = 10.00
+
+[providers.anthropic.models.claude-sonnet-4-6]
+input_per_mtok_usd  = 3.00
+output_per_mtok_usd = 15.00
+
+[providers.anthropic.models.claude-sonnet-4-5]
+input_per_mtok_usd  = 3.00
+output_per_mtok_usd = 15.00
+
+[providers.anthropic.models.claude-sonnet-4]
+input_per_mtok_usd  = 3.00
+output_per_mtok_usd = 15.00
+
+[providers.anthropic.models.claude-haiku-5-5]
+input_per_mtok_usd  = 0.10
+output_per_mtok_usd = 0.50
+
+[providers.anthropic.models.claude-haiku-4-5]
+input_per_mtok_usd  = 1.00
+output_per_mtok_usd = 5.00
+
+[providers.anthropic.models.claude-haiku-3-5]
+input_per_mtok_usd  = 0.80
+output_per_mtok_usd = 4.00
+
+[providers.google.models.gemini-4-argon]
+input_per_mtok_usd  = 2.00
+output_per_mtok_usd = 10.00
+
+[providers.google.models.gemini-3-8-flash]
+input_per_mtok_usd  = 0.75
+output_per_mtok_usd = 3.75
+
+[providers.google.models.gemini-3-6-flash]
+input_per_mtok_usd  = 0.75
+output_per_mtok_usd = 3.75
+
+[providers.google.models.gemini-3-5-flash-lite]
+input_per_mtok_usd  = 0.30
+output_per_mtok_usd = 2.50
+
 [providers.google.models.gemini-3-1-pro]
 input_per_mtok_usd  = 2.00
 output_per_mtok_usd = 12.00
+
+[providers.google.models.gemini-3-1-flash-lite]
+input_per_mtok_usd  = 0.25
+output_per_mtok_usd = 1.50
+
+[providers.google.models.gemini-3-flash]
+input_per_mtok_usd  = 0.50
+output_per_mtok_usd = 3.00
+
+[providers.google.models.gemini-2-5-pro]
+input_per_mtok_usd  = 1.25
+output_per_mtok_usd = 10.00
+
+[providers.google.models.gemini-2-5-flash]
+input_per_mtok_usd  = 0.30
+output_per_mtok_usd = 2.50
+
+[providers.google.models.gemini-2-5-flash-lite]
+input_per_mtok_usd  = 0.10
+output_per_mtok_usd = 0.40
+
+[providers.google.models.gemini-embedding-2]
+input_per_mtok_usd  = 0.20
+output_per_mtok_usd = 0.00
+
+[providers.openai.models.gpt-6-astra]
+input_per_mtok_usd  = 10.00
+output_per_mtok_usd = 50.00
+
+[providers.openai.models.gpt-6-1-sol]
+input_per_mtok_usd  = 2.00
+output_per_mtok_usd = 10.00
+
+[providers.openai.models.gpt-6-sol]
+input_per_mtok_usd  = 2.00
+output_per_mtok_usd = 10.00
+
+[providers.openai.models.gpt-6-luna]
+input_per_mtok_usd  = 0.10
+output_per_mtok_usd = 0.50
+
+[providers.openai.models.gpt-5-6-sol]
+input_per_mtok_usd  = 4.00
+output_per_mtok_usd = 20.00
+
+[providers.openai.models.gpt-5-6-terra]
+input_per_mtok_usd  = 2.00
+output_per_mtok_usd = 12.00
+
+[providers.openai.models.gpt-5-6-luna]
+input_per_mtok_usd  = 0.20
+output_per_mtok_usd = 1.20
+
+[providers.openai.models.gpt-5-5]
+input_per_mtok_usd  = 5.00
+output_per_mtok_usd = 30.00
+
+[providers.openai.models.gpt-5-5-pro]
+input_per_mtok_usd  = 30.00
+output_per_mtok_usd = 180.00
+
+[providers.openai.models.gpt-5-4]
+input_per_mtok_usd  = 2.50
+output_per_mtok_usd = 15.00
+
+[providers.openai.models.gpt-5-4-pro]
+input_per_mtok_usd  = 30.00
+output_per_mtok_usd = 180.00
+
+[providers.openai.models.gpt-5-4-mini]
+input_per_mtok_usd  = 0.75
+output_per_mtok_usd = 4.50
+
+[providers.openai.models.gpt-5-4-nano]
+input_per_mtok_usd  = 0.20
+output_per_mtok_usd = 1.25
+
+[providers.openai.models.gpt-5-3-codex]
+input_per_mtok_usd  = 1.75
+output_per_mtok_usd = 14.00
+
+[providers.openai.models.gpt-5-2]
+input_per_mtok_usd  = 1.75
+output_per_mtok_usd = 14.00
+
+[providers.openai.models.gpt-5-2-pro]
+input_per_mtok_usd  = 21.00
+output_per_mtok_usd = 168.00
+
+[providers.openai.models.gpt-5-1]
+input_per_mtok_usd  = 1.25
+output_per_mtok_usd = 10.00
+
+[providers.openai.models.gpt-5]
+input_per_mtok_usd  = 1.25
+output_per_mtok_usd = 10.00
+
+[providers.openai.models.gpt-5-mini]
+input_per_mtok_usd  = 0.25
+output_per_mtok_usd = 2.00
+
+[providers.openai.models.gpt-5-nano]
+input_per_mtok_usd  = 0.05
+output_per_mtok_usd = 0.40
+
+[providers.openai.models.gpt-5-pro]
+input_per_mtok_usd  = 15.00
+output_per_mtok_usd = 120.00
+
+[providers.openai.models.gpt-4-1]
+input_per_mtok_usd  = 2.00
+output_per_mtok_usd = 8.00
+
+[providers.openai.models.gpt-4-1-mini]
+input_per_mtok_usd  = 0.40
+output_per_mtok_usd = 1.60
+
+[providers.openai.models.gpt-4-1-nano]
+input_per_mtok_usd  = 0.10
+output_per_mtok_usd = 0.40
+
+[providers.openai.models.gpt-4o]
+input_per_mtok_usd  = 2.50
+output_per_mtok_usd = 10.00
+
+[providers.openai.models.gpt-4o-mini]
+input_per_mtok_usd  = 0.15
+output_per_mtok_usd = 0.60
+
+[providers.openai.models.o1]
+input_per_mtok_usd  = 15.00
+output_per_mtok_usd = 60.00
+
+[providers.openai.models.o1-pro]
+input_per_mtok_usd  = 150.00
+output_per_mtok_usd = 600.00
+
+[providers.openai.models.o3]
+input_per_mtok_usd  = 2.00
+output_per_mtok_usd = 8.00
+
+[providers.openai.models.o3-pro]
+input_per_mtok_usd  = 20.00
+output_per_mtok_usd = 80.00
+
+[providers.openai.models.o3-mini]
+input_per_mtok_usd  = 1.10
+output_per_mtok_usd = 4.40
+
+[providers.openai.models.o4-mini]
+input_per_mtok_usd  = 1.10
+output_per_mtok_usd = 4.40
+
+[providers.openai.models.text-embedding-3-small]
+input_per_mtok_usd  = 0.02
+output_per_mtok_usd = 0.00
+
+[providers.openai.models.text-embedding-3-large]
+input_per_mtok_usd  = 0.13
+output_per_mtok_usd = 0.00

@@ -9,23 +9,45 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// The two local inference servers the gateway fronts.
+/// The servers the gateway fronts: the two local inference servers, which are polled and get their own
+/// listeners, and the three cloud providers the unified listener can route to. Every request to a cloud
+/// provider leaves the machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Backend {
     #[serde(rename = "lmstudio")]
     LmStudio,
     #[serde(rename = "ollama")]
     Ollama,
+    #[serde(rename = "anthropic")]
+    Anthropic,
+    #[serde(rename = "gemini")]
+    Gemini,
+    #[serde(rename = "openai")]
+    OpenAi,
 }
 
 impl Backend {
-    pub const ALL: [Backend; 2] = [Backend::LmStudio, Backend::Ollama];
+    pub const ALL: [Backend; 5] = [
+        Backend::LmStudio,
+        Backend::Ollama,
+        Backend::Anthropic,
+        Backend::Gemini,
+        Backend::OpenAi,
+    ];
+    /// The local inference servers.
+    pub const LOCAL: [Backend; 2] = [Backend::LmStudio, Backend::Ollama];
+    /// The hosted APIs; a request to one of these is cloud egress.
+    pub const CLOUD_PROVIDERS: [Backend; 3] =
+        [Backend::Anthropic, Backend::Gemini, Backend::OpenAi];
 
     /// The stable identifier used in config keys, URLs and the database.
     pub fn as_str(self) -> &'static str {
         match self {
             Backend::LmStudio => "lmstudio",
             Backend::Ollama => "ollama",
+            Backend::Anthropic => "anthropic",
+            Backend::Gemini => "gemini",
+            Backend::OpenAi => "openai",
         }
     }
 
@@ -34,7 +56,20 @@ impl Backend {
         match self {
             Backend::LmStudio => "LM Studio",
             Backend::Ollama => "Ollama",
+            Backend::Anthropic => "Anthropic",
+            Backend::Gemini => "Gemini",
+            Backend::OpenAi => "OpenAI",
         }
+    }
+
+    /// A server on this machine (or the operator's network): polled, never cloud egress by itself.
+    pub fn is_local(self) -> bool {
+        matches!(self, Backend::LmStudio | Backend::Ollama)
+    }
+
+    /// A hosted API: every request to it leaves the machine.
+    pub fn is_cloud_provider(self) -> bool {
+        !self.is_local()
     }
 }
 
@@ -45,7 +80,7 @@ impl fmt::Display for Backend {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("unknown backend `{0}` (expected `lmstudio` or `ollama`)")]
+#[error("unknown backend `{0}` (expected one of lmstudio, ollama, anthropic, gemini, openai)")]
 pub struct UnknownBackend(pub String);
 
 impl FromStr for Backend {
@@ -55,6 +90,9 @@ impl FromStr for Backend {
         match s.trim().to_ascii_lowercase().as_str() {
             "lmstudio" | "lm-studio" | "lm_studio" | "lm studio" => Ok(Backend::LmStudio),
             "ollama" => Ok(Backend::Ollama),
+            "anthropic" => Ok(Backend::Anthropic),
+            "gemini" => Ok(Backend::Gemini),
+            "openai" => Ok(Backend::OpenAi),
             other => Err(UnknownBackend(other.to_string())),
         }
     }
@@ -151,9 +189,37 @@ mod tests {
         assert_eq!("lmstudio".parse::<Backend>(), Ok(Backend::LmStudio));
         assert_eq!("LM Studio".parse::<Backend>(), Ok(Backend::LmStudio));
         assert_eq!(" ollama ".parse::<Backend>(), Ok(Backend::Ollama));
+        assert_eq!("anthropic".parse::<Backend>(), Ok(Backend::Anthropic));
+        assert_eq!("Gemini".parse::<Backend>(), Ok(Backend::Gemini));
+        assert_eq!("openai".parse::<Backend>(), Ok(Backend::OpenAi));
         assert_eq!(
             "vllm".parse::<Backend>(),
             Err(UnknownBackend("vllm".into()))
+        );
+        for backend in Backend::ALL {
+            assert_eq!(backend.as_str().parse::<Backend>(), Ok(backend));
+            assert_eq!(
+                serde_json::from_str::<Backend>(&format!("\"{}\"", backend.as_str())).unwrap(),
+                backend
+            );
+        }
+    }
+
+    #[test]
+    fn backends_split_into_local_servers_and_cloud_providers() {
+        for backend in Backend::ALL {
+            assert_ne!(backend.is_local(), backend.is_cloud_provider());
+            let listed_local = Backend::LOCAL.contains(&backend);
+            let listed_cloud = Backend::CLOUD_PROVIDERS.contains(&backend);
+            assert!(
+                listed_local != listed_cloud,
+                "{backend} must be in exactly one list"
+            );
+            assert_eq!(listed_local, backend.is_local());
+        }
+        assert_eq!(
+            Backend::LOCAL.len() + Backend::CLOUD_PROVIDERS.len(),
+            Backend::ALL.len()
         );
     }
 
@@ -198,7 +264,8 @@ mod tests {
 
 /// How a proxied request was classified. It decides the stream parser, whether bodies are captured and
 /// scanned, and how errors are shaped. `Passthrough` is everything that is not inference: model lists,
-/// pulls, blobs, unknown paths and WebSocket upgrades.
+/// pulls, blobs, unknown paths and WebSocket upgrades. `CloudPassthrough` is the same kind of request bound
+/// for a cloud provider with a body, which is scanned and kept because the body leaves the machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ApiFormat {
     /// Ollama `/api/chat` and `/api/generate`: NDJSON or a single JSON object with engine timings.
@@ -231,10 +298,15 @@ pub enum ApiFormat {
     /// Everything else, recorded as metadata only.
     #[serde(rename = "passthrough")]
     Passthrough,
+    /// A non-inference request with a body bound for a cloud provider (Gemini `cachedContents`, Anthropic
+    /// `count_tokens`, uploads): buffered, scanned and stored like inference because the body leaves the
+    /// machine, kept past the passthrough retention, not a feed row.
+    #[serde(rename = "cloud_passthrough")]
+    CloudPassthrough,
 }
 
 impl ApiFormat {
-    pub const ALL: [ApiFormat; 10] = [
+    pub const ALL: [ApiFormat; 11] = [
         ApiFormat::OllamaNative,
         ApiFormat::OllamaEmbeddings,
         ApiFormat::OpenAiChat,
@@ -245,6 +317,7 @@ impl ApiFormat {
         ApiFormat::LmStudioNative,
         ApiFormat::LmStudioEmbeddings,
         ApiFormat::Passthrough,
+        ApiFormat::CloudPassthrough,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -259,12 +332,18 @@ impl ApiFormat {
             ApiFormat::LmStudioNative => "lmstudio_native",
             ApiFormat::LmStudioEmbeddings => "lmstudio_embeddings",
             ApiFormat::Passthrough => "passthrough",
+            ApiFormat::CloudPassthrough => "cloud_passthrough",
         }
     }
 
     /// Whether the request is an inference call whose body is buffered, scanned and parsed.
     pub fn is_inference(self) -> bool {
-        self != ApiFormat::Passthrough
+        !self.is_passthrough()
+    }
+
+    /// Whether the request is not an inference call: never parsed, never a feed row.
+    pub fn is_passthrough(self) -> bool {
+        matches!(self, ApiFormat::Passthrough | ApiFormat::CloudPassthrough)
     }
 
     pub fn is_embeddings(self) -> bool {
@@ -477,7 +556,7 @@ pub struct RequestRecord {
     pub model_requested: Option<String>,
     /// The model the backend reported, or the requested one resolved against the model list.
     pub model_resolved: Option<String>,
-    /// Routed to an Ollama `:cloud` model: the prompt left the machine.
+    /// The prompt left the machine: an Ollama `:cloud` model or a cloud provider.
     pub is_cloud: bool,
     pub started_at: DateTime<Utc>,
     pub first_byte_at: Option<DateTime<Utc>>,
@@ -506,6 +585,13 @@ pub struct RequestRecord {
     pub max_severity: Option<Severity>,
     /// Frontier model key → total USD at the prices in force when the record was written.
     pub hypothetical_cost: BTreeMap<String, f64>,
+    /// What a completed request to a cloud provider cost at that provider's list price, when the model is
+    /// priced and both token counts are known. Local requests have none.
+    pub actual_cost_usd: Option<f64>,
+    /// How the backend was chosen: `listener` on a per-backend listener, otherwise the unified listener's
+    /// reason (`alias`, `model_list`, `provider_prefix`, `route`, `model_pattern`, `header`, `default`,
+    /// `prefix`, `path`).
+    pub routed_by: Option<String>,
 }
 
 impl RequestRecord {
@@ -667,7 +753,7 @@ impl ModelState {
     }
 }
 
-/// One row of the models table, the same shape for both backends. Field names follow LMS-Monitor's
+/// One row of the models table, the same shape for every backend. Field names follow LMS-Monitor's
 /// `ModelInfo`, which Ollama-Monitor mirrored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelInfo {

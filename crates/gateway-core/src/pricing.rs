@@ -97,6 +97,21 @@ impl PricingTable {
         self.by_model.get(model_key).map(|e| e.price)
     }
 
+    /// The rate for a model id as a provider spells it (`claude-opus-5-5-20260101`, `gemini-3.1-pro-preview`,
+    /// `openai/gpt-5.5`): the id is normalised to the table's key style and the longest key that prefixes
+    /// it at a `-`, `:`, `@` or end boundary wins, so a dated snapshot or a `-preview` suffix still prices.
+    pub fn price_for_model(&self, model: &str) -> Option<(&str, ModelPricing)> {
+        let id = normalise_model_id(model);
+        self.by_model
+            .iter()
+            .filter(|(key, _)| {
+                id.strip_prefix(key.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', ':', '@']))
+            })
+            .max_by_key(|(key, _)| key.len())
+            .map(|(key, entry)| (key.as_str(), entry.price))
+    }
+
     pub fn entries(&self) -> impl Iterator<Item = (&str, &PriceEntry)> {
         self.by_model.iter().map(|(k, v)| (k.as_str(), v))
     }
@@ -132,6 +147,17 @@ impl PricingTable {
             .map(|(k, c)| (k, c.total_usd))
             .collect()
     }
+}
+
+/// Lower-case, `provider/` and Gemini's `models/` prefixes dropped, dots to hyphens: the table's key style.
+fn normalise_model_id(model: &str) -> String {
+    let lower = model.trim().to_ascii_lowercase();
+    let stripped = crate::types::Backend::ALL
+        .iter()
+        .find_map(|b| lower.strip_prefix(&format!("{}/", b.as_str())))
+        .unwrap_or(&lower);
+    let stripped = stripped.strip_prefix("models/").unwrap_or(stripped);
+    stripped.replace('.', "-")
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -224,8 +250,49 @@ mod tests {
         );
         assert_eq!(opus.price.output_per_mtok_usd, 2.0);
         assert_eq!(table.get("local-model").unwrap().input_per_mtok_usd, 0.0);
-        assert_eq!(table.entries().count(), FRONTIER_MODELS.len() + 1);
+        assert_eq!(
+            table.entries().count(),
+            PricingTable::baked().entries().count() + 1
+        );
         assert!(table.missing_frontier().is_empty());
+    }
+
+    #[test]
+    fn provider_model_ids_price_by_their_longest_table_key() {
+        let table = PricingTable::baked();
+        for (model, key) in [
+            ("claude-opus-5-5", "claude-opus-5-5"),
+            ("claude-opus-5-5-20260101", "claude-opus-5-5"),
+            ("Claude-Opus-5@2026", "claude-opus-5"),
+            ("anthropic/claude-fable-5-1", "claude-fable-5-1"),
+            ("gemini-3.1-pro-preview", "gemini-3-1-pro"),
+            ("models/gemini-3.1-pro", "gemini-3-1-pro"),
+            ("gpt-5.5", "gpt-5-5"),
+            ("openai/gpt-5.5-pro", "gpt-5-5-pro"),
+            ("gpt-5-mini-2026-01-01", "gpt-5-mini"),
+            ("o3-mini", "o3-mini"),
+            ("text-embedding-3-small", "text-embedding-3-small"),
+        ] {
+            let (found, price) = table
+                .price_for_model(model)
+                .unwrap_or_else(|| panic!("{model} has no price"));
+            assert_eq!(found, key, "{model}");
+            assert!(price.input_per_mtok_usd >= 0.0);
+        }
+        assert_eq!(
+            table
+                .price_for_model("claude-opus-5-5-pro-max")
+                .map(|(k, _)| k),
+            Some("claude-opus-5-5"),
+            "an unknown suffix still prices at the known prefix"
+        );
+        assert_eq!(
+            table.price_for_model("claude-opus-55"),
+            None,
+            "a key must end at a `-`, `:`, `@` or end boundary of the id"
+        );
+        assert_eq!(table.price_for_model("qwen/qwen3.6-27b"), None);
+        assert_eq!(table.price_for_model(""), None);
     }
 
     #[test]

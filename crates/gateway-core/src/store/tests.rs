@@ -67,7 +67,56 @@ fn record(
         finding_count: 0,
         max_severity: None,
         hypothetical_cost: BTreeMap::from([("claude-fable-5-1".to_string(), 0.00036)]),
+        actual_cost_usd: None,
+        routed_by: None,
     }
+}
+
+#[tokio::test]
+async fn the_routing_decision_and_real_cost_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(&temp_db_path(&dir)).await.unwrap();
+    let session = store.writer.start_session("0.1.0-test").await.unwrap();
+    let mut rec = record(
+        session,
+        Backend::Anthropic,
+        ApiFormat::AnthropicMessages,
+        Outcome::Completed,
+        10,
+    );
+    rec.is_cloud = true;
+    rec.actual_cost_usd = Some(0.0123);
+    rec.routed_by = Some("alias".into());
+    store
+        .writer
+        .persist_request(rec.clone(), Vec::new(), Vec::new())
+        .await
+        .unwrap();
+    let id = rec.id;
+    let detail = store
+        .reads
+        .run(move |c| read::get_request(c, id))
+        .await
+        .unwrap()
+        .expect("stored");
+    assert_eq!(detail.record, rec);
+    let page = store
+        .reads
+        .run(|c| {
+            read::list_requests(
+                c,
+                &RequestFilter {
+                    backend: Some(Backend::Anthropic),
+                    limit: 10,
+                    ..RequestFilter::default()
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].record.routed_by.as_deref(), Some("alias"));
+    assert_eq!(page.items[0].record.actual_cost_usd, Some(0.0123));
 }
 
 fn body(request_id: Uuid, direction: Direction, text: &str) -> Body {

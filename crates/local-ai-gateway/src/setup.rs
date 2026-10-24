@@ -287,9 +287,12 @@ mod tests {
             config_dir: dir.path().to_path_buf(),
         };
         let mut config = Config::default();
-        // Nothing listens on these during tests; the probes must not hang.
+        // Nothing listens on these during tests; the probes must not hang, and nothing may leave the machine.
         config.backends.lmstudio.upstream = "http://127.0.0.1:9".into();
         config.backends.ollama.upstream = "http://127.0.0.1:9".into();
+        config.backends.anthropic.upstream = "http://127.0.0.1:9".into();
+        config.backends.gemini.upstream = "http://127.0.0.1:9".into();
+        config.backends.openai.upstream = "http://127.0.0.1:9".into();
         let checks = run_checks(&config, &dir.path().join("config.toml"), &paths, dir.path());
         assert!(
             checks.iter().all(|c| c.level != Level::Fail),

@@ -34,10 +34,21 @@ fn stricter(a: DlpAction, b: DlpAction) -> DlpAction {
 }
 
 impl Policy {
+    /// Keeps a copy of the configuration with the `[dlp.backends.<name>]` keys canonicalised, so a table
+    /// written as `lm-studio` applies to LM Studio like validation says it does.
     pub fn new(config: &DlpConfig) -> Self {
-        Self {
-            config: config.clone(),
-        }
+        let mut config = config.clone();
+        config.backends = std::mem::take(&mut config.backends)
+            .into_iter()
+            .map(|(key, value)| {
+                let canonical = key
+                    .parse::<Backend>()
+                    .map(|b| b.as_str().to_string())
+                    .unwrap_or(key);
+                (canonical, value)
+            })
+            .collect();
+        Self { config }
     }
 
     pub fn config(&self) -> &DlpConfig {
@@ -160,6 +171,34 @@ mod tests {
             !Policy::new(&cfg.dlp)
                 .resolve(&rule("aws-access-key-id"), Backend::Ollama, false)
                 .redact
+        );
+    }
+
+    #[test]
+    fn backend_tables_apply_under_any_accepted_spelling_and_to_cloud_providers() {
+        let cfg = Config::parse(
+            "[dlp.backends.lm-studio]\nrequest_action = \"record\"\n[dlp.backends.anthropic]\nrequest_action = \"record\"\n",
+        )
+        .unwrap();
+        let policy = Policy::new(&cfg.dlp);
+        assert_eq!(
+            policy
+                .resolve(&rule("aws-access-key-id"), Backend::LmStudio, false)
+                .request_action,
+            DlpAction::Record
+        );
+        assert_eq!(
+            policy
+                .resolve(&rule("aws-access-key-id"), Backend::Anthropic, true)
+                .request_action,
+            DlpAction::Block,
+            "a cloud provider's own override still cannot loosen the cloud policy"
+        );
+        assert_eq!(
+            policy
+                .resolve(&rule("email"), Backend::Anthropic, true)
+                .request_action,
+            DlpAction::Alert
         );
     }
 }

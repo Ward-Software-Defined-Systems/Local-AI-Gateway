@@ -110,13 +110,13 @@ pub const SUMMARY_COLUMNS: &str = "id, session_id, backend, listener, kind, clie
      api_format, streamed, model_requested, model_resolved, is_cloud, started_at, first_byte_at, ended_at, status, outcome, \
      failure_source, rejected_input_tokens, rejected_context_length, blocked_rule_id, error_summary, prompt_tokens, gen_tokens, \
      tokens_estimated, ttft_ms, total_ms, tokens_per_sec, timings_estimated, stop_reason, request_bytes, response_bytes, \
-     finding_count, max_severity, hypothetical_cost";
+     finding_count, max_severity, hypothetical_cost, actual_cost_usd, routed_by";
 
 pub const RECORD_COLUMNS: &str = "id, session_id, backend, listener, kind, client_ip, user_agent, client_request_id, method, path, query, \
      api_format, streamed, model_requested, model_resolved, is_cloud, started_at, first_byte_at, ended_at, status, outcome, \
      failure_source, rejected_input_tokens, rejected_context_length, blocked_rule_id, error_summary, prompt_tokens, gen_tokens, \
      tokens_estimated, ttft_ms, total_ms, tokens_per_sec, timings_estimated, stop_reason, request_bytes, response_bytes, \
-     finding_count, max_severity, hypothetical_cost, request_headers, response_headers, chunk_timeline";
+     finding_count, max_severity, hypothetical_cost, actual_cost_usd, routed_by, request_headers, response_headers, chunk_timeline";
 
 pub fn insert_request(conn: &Connection, r: &RequestRecord) -> Result<()> {
     let o = outcome_columns(&r.outcome);
@@ -126,9 +126,10 @@ pub fn insert_request(conn: &Connection, r: &RequestRecord) -> Result<()> {
             api_format, streamed, model_requested, model_resolved, is_cloud, started_at, first_byte_at, ended_at, status, outcome,
             failure_source, rejected_input_tokens, rejected_context_length, blocked_rule_id, error_summary, prompt_tokens, gen_tokens,
             tokens_estimated, ttft_ms, total_ms, tokens_per_sec, timings_estimated, stop_reason, request_bytes, response_bytes,
-            request_headers, response_headers, chunk_timeline, finding_count, max_severity, hypothetical_cost
+            request_headers, response_headers, chunk_timeline, finding_count, max_severity, hypothetical_cost,
+            actual_cost_usd, routed_by
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24,
-                   ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42)",
+                   ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44)",
     )?
     .execute(params![
         r.id.to_string(),
@@ -173,6 +174,8 @@ pub fn insert_request(conn: &Connection, r: &RequestRecord) -> Result<()> {
         i64::from(r.finding_count),
         r.max_severity.map(|s| s.as_str()),
         serde_json::to_string(&r.hypothetical_cost)?,
+        r.actual_cost_usd,
+        r.routed_by,
     ])
     .context("insert request_records")?;
     Ok(())
@@ -190,9 +193,9 @@ pub fn map_record(row: &Row<'_>, with_heavy: bool) -> rusqlite::Result<RequestRe
     let outcome: String = row.get(20)?;
     let cost: Option<String> = row.get(38)?;
     let (request_headers, response_headers, chunk_timeline) = if with_heavy {
-        let rh: String = row.get(39)?;
-        let sh: String = row.get(40)?;
-        let tl: Option<String> = row.get(41)?;
+        let rh: String = row.get(41)?;
+        let sh: String = row.get(42)?;
+        let tl: Option<String> = row.get(43)?;
         (
             serde_json::from_str(&rh).unwrap_or_default(),
             serde_json::from_str(&sh).unwrap_or_default(),
@@ -253,6 +256,8 @@ pub fn map_record(row: &Row<'_>, with_heavy: bool) -> rusqlite::Result<RequestRe
         hypothetical_cost: cost
             .and_then(|c| serde_json::from_str::<BTreeMap<String, f64>>(&c).ok())
             .unwrap_or_default(),
+        actual_cost_usd: row.get(39)?,
+        routed_by: row.get(40)?,
     })
 }
 

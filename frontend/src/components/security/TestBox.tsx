@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { actions } from '../../api/hooks'
-import { BACKEND_NAMES, type Backend } from '../../api/types'
+import { BACKEND_NAMES, CLOUD_BACKENDS, type Backend } from '../../api/types'
 import FindingsTable from '../requests/FindingsTable'
 
 const select = 'rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200'
@@ -14,7 +14,10 @@ export default function TestBox() {
   const [text, setText] = useState('')
   const [backend, setBackend] = useState<Backend>('ollama')
   const [cloud, setCloud] = useState(false)
-  const scan = useMutation({ mutationFn: () => actions.dlpTest(text, backend, cloud) })
+  // A request to a cloud provider always leaves the machine, whatever the box says.
+  const toProvider = CLOUD_BACKENDS.includes(backend)
+  const leavesMachine = cloud || toProvider
+  const scan = useMutation({ mutationFn: () => actions.dlpTest(text, backend, leavesMachine) })
   const result = scan.data
 
   return (
@@ -34,8 +37,8 @@ export default function TestBox() {
             </option>
           ))}
         </select>
-        <label className="flex items-center gap-1 text-zinc-400">
-          <input type="checkbox" checked={cloud} onChange={(e) => setCloud(e.target.checked)} /> cloud model
+        <label className="flex items-center gap-1 text-zinc-400" title={toProvider ? 'every request to a cloud provider leaves the machine' : 'an Ollama :cloud model'}>
+          <input type="checkbox" checked={leavesMachine} disabled={toProvider} onChange={(e) => setCloud(e.target.checked)} /> leaves the machine
         </label>
         <button type="button" className={button} onClick={() => scan.mutate()} disabled={scan.isPending || text.trim() === ''}>
           {scan.isPending ? 'scanning…' : 'scan'}

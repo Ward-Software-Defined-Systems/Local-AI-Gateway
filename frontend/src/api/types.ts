@@ -1,6 +1,6 @@
 // Mirrors of the Rust serde shapes in gateway-core and the dashboard API. Kept in step by hand.
 
-export type Backend = 'lmstudio' | 'ollama'
+export type Backend = 'lmstudio' | 'ollama' | 'anthropic' | 'gemini' | 'openai'
 export type Platform = 'macos' | 'linux' | 'other'
 export type ApiFormat =
   | 'ollama_native'
@@ -13,6 +13,7 @@ export type ApiFormat =
   | 'lmstudio_native'
   | 'lmstudio_embeddings'
   | 'passthrough'
+  | 'cloud_passthrough'
 export type RequestKind = 'http' | 'upgrade' | 'load'
 export type Severity = 'low' | 'medium' | 'high' | 'critical'
 export type ModelState = 'loaded' | 'not-loaded' | 'cloud'
@@ -63,6 +64,10 @@ export interface RequestRecord {
   finding_count: number
   max_severity: Severity | null
   hypothetical_cost: Record<string, number>
+  /** Real cost at the provider's list price; only completed requests to a cloud provider have one. */
+  actual_cost_usd: number | null
+  /** How the backend was chosen: `listener` on a per-backend listener, the unified listener's reason otherwise. */
+  routed_by: string | null
 }
 
 export interface RequestSummary extends RequestRecord {
@@ -305,7 +310,17 @@ export type ServerMessage =
   | { type: 'hardware'; sample: HardwareSample }
   | { type: 'metrics'; rolling: RollingMetrics }
 
-export const BACKEND_NAMES: Record<Backend, string> = { lmstudio: 'LM Studio', ollama: 'Ollama' }
+export const BACKEND_NAMES: Record<Backend, string> = {
+  lmstudio: 'LM Studio',
+  ollama: 'Ollama',
+  anthropic: 'Anthropic',
+  gemini: 'Gemini',
+  openai: 'OpenAI',
+}
+/** The servers on this machine: polled, with their own listeners and process stats. */
+export const LOCAL_BACKENDS: Backend[] = ['lmstudio', 'ollama']
+/** The hosted APIs: every request to one leaves the machine. */
+export const CLOUD_BACKENDS: Backend[] = ['anthropic', 'gemini', 'openai']
 
 export type FindingCategory = 'secret' | 'pii' | 'known_secret' | 'custom'
 export type DlpAction = 'record' | 'alert' | 'block'
@@ -352,6 +367,7 @@ export const API_FORMATS: ApiFormat[] = [
   'lmstudio_native',
   'lmstudio_embeddings',
   'passthrough',
+  'cloud_passthrough',
 ]
 
 export const OUTCOMES = ['completed', 'failed', 'rejected', 'blocked', 'client_aborted'] as const
@@ -403,8 +419,9 @@ export interface RuleView {
   keywords: string[]
   min_entropy: number | null
   validator: string | null
-  request_action: Record<'lmstudio' | 'ollama' | 'cloud', DlpAction>
-  response_action: Record<'lmstudio' | 'ollama', ResponseAction>
+  /** Per backend id (cloud providers resolved as cloud egress) plus `cloud` for Ollama cloud models. */
+  request_action: Record<string, DlpAction>
+  response_action: Record<string, ResponseAction>
 }
 
 export interface RulesView {

@@ -326,7 +326,7 @@ async fn serve_all(startup: Startup) -> Result<()> {
         warn!("no backend is enabled: the gateway is running without proxy listeners");
     }
 
-    for (backend, backend_cfg) in config.backends.enabled() {
+    for (backend, backend_cfg) in config.backends.enabled().filter(|(b, _)| b.is_local()) {
         tokio::spawn(gateway_backends::run(
             PollerConfig {
                 backend,

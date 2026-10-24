@@ -262,6 +262,8 @@ mod tests {
             finding_count: 0,
             max_severity: None,
             hypothetical_cost: BTreeMap::new(),
+            actual_cost_usd: None,
+            routed_by: None,
         }
     }
 

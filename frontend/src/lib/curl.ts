@@ -8,7 +8,7 @@ export function copyAsCurl(record: RequestRecord, body: string | null): string {
   const parts = ['curl', '-sN', record.method !== 'GET' ? `-X ${record.method}` : '', shellQuote(url)].filter(Boolean)
   for (const [name, value] of record.request_headers) {
     if (['host', 'content-length', 'connection', 'accept-encoding', 'x-request-id'].includes(name)) continue
-    const shown = name === 'authorization' ? 'Bearer <REDACTED>' : name === 'x-api-key' || name === 'cookie' ? '<REDACTED>' : value
+    const shown = name === 'authorization' ? 'Bearer <REDACTED>' : name === 'x-api-key' || name === 'x-goog-api-key' || name === 'cookie' ? '<REDACTED>' : value
     parts.push('-H', shellQuote(`${name}: ${shown}`))
   }
   if (body !== null && body !== '' && record.method !== 'GET') {

@@ -1,13 +1,23 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { actions, useDlpRules } from '../../api/hooks'
-import type { ApplyReport, DlpAction, RuleView } from '../../api/types'
+import { BACKEND_NAMES, type ApplyReport, type Backend, type DlpAction, type RuleView } from '../../api/types'
 import { severityClass } from '../../lib/colours'
 
 const button = 'rounded border border-zinc-700 px-2 py-0.5 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50'
 
-function actionClass(a: DlpAction): string {
+/** One request-action column per backend, then Ollama's cloud models. */
+const REQUEST_COLUMNS: { key: string; label: string }[] = [
+  ...(Object.keys(BACKEND_NAMES) as Backend[]).map((b) => ({ key: b, label: BACKEND_NAMES[b] })),
+  { key: 'cloud', label: 'Ollama cloud' },
+]
+
+function actionClass(a: DlpAction | undefined): string {
   return a === 'block' ? 'ink-critical' : a === 'alert' ? 'ink-warning' : 'text-zinc-400'
+}
+
+function repliesText(rule: RuleView): string {
+  return [...new Set(Object.values(rule.response_action))].join(' / ') || '-'
 }
 
 function hint(rule: RuleView): string {
@@ -76,9 +86,11 @@ export default function RulesMatrix() {
               <th className="pb-1 pr-3 font-normal">severity</th>
               <th className="pb-1 pr-3 font-normal">enabled</th>
               <th className="pb-1 pr-3 font-normal">redact</th>
-              <th className="pb-1 pr-3 font-normal">LM Studio</th>
-              <th className="pb-1 pr-3 font-normal">Ollama</th>
-              <th className="pb-1 pr-3 font-normal">Ollama cloud</th>
+              {REQUEST_COLUMNS.map((c) => (
+                <th key={c.key} className="pb-1 pr-3 font-normal">
+                  {c.label}
+                </th>
+              ))}
               <th className="pb-1 font-normal">replies</th>
             </tr>
           </thead>
@@ -93,14 +105,12 @@ export default function RulesMatrix() {
                 <td className={`py-1 pr-3 ${r.enabled ? severityClass(r.severity) : ''}`}>{r.severity}</td>
                 <td className="py-1 pr-3">{r.enabled ? 'yes' : 'no'}</td>
                 <td className="py-1 pr-3 text-zinc-400">{r.redact ? 'yes' : 'no'}</td>
-                <td className={`py-1 pr-3 ${r.enabled ? actionClass(r.request_action.lmstudio) : ''}`}>{r.request_action.lmstudio}</td>
-                <td className={`py-1 pr-3 ${r.enabled ? actionClass(r.request_action.ollama) : ''}`}>{r.request_action.ollama}</td>
-                <td className={`py-1 pr-3 ${r.enabled ? actionClass(r.request_action.cloud) : ''}`}>{r.request_action.cloud}</td>
-                <td className="py-1 text-zinc-400">
-                  {r.response_action.lmstudio === r.response_action.ollama
-                    ? r.response_action.ollama
-                    : `${r.response_action.lmstudio} / ${r.response_action.ollama}`}
-                </td>
+                {REQUEST_COLUMNS.map((c) => (
+                  <td key={c.key} className={`py-1 pr-3 ${r.enabled ? actionClass(r.request_action[c.key]) : ''}`}>
+                    {r.request_action[c.key] ?? '-'}
+                  </td>
+                ))}
+                <td className="py-1 text-zinc-400">{repliesText(r)}</td>
               </tr>
             ))}
           </tbody>

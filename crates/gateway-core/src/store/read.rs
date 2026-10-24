@@ -88,7 +88,7 @@ pub fn lifetime_totals(conn: &Connection) -> Result<LifetimeTotals> {
         "SELECT (SELECT COUNT(*) FROM sessions),
                 COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(gen_tokens), 0)
          FROM request_records
-         WHERE kind = 'http' AND api_format != 'passthrough' AND outcome = 'completed'",
+         WHERE kind = 'http' AND api_format NOT IN ('passthrough', 'cloud_passthrough') AND outcome = 'completed'",
         [],
         |r| {
             Ok(LifetimeTotals {
@@ -623,7 +623,8 @@ pub fn series_rows(conn: &Connection, query: &SeriesQuery) -> Result<Vec<SeriesR
     let mut sql = String::from(
         "SELECT started_at, COALESCE(model_resolved, model_requested, '?'), client_ip, outcome, COALESCE(prompt_tokens, 0), \
          COALESCE(gen_tokens, 0), tokens_per_sec, ttft_ms, hypothetical_cost \
-         FROM request_records WHERE kind = 'http' AND api_format != 'passthrough' AND started_at >= ?1 AND started_at < ?2",
+         FROM request_records WHERE kind = 'http' AND api_format NOT IN ('passthrough', 'cloud_passthrough') \
+         AND started_at >= ?1 AND started_at < ?2",
     );
     let mut args: Vec<Box<dyn ToSql>> = vec![Box::new(ms(query.from)), Box::new(ms(query.to))];
     if let Some(backend) = query.backend {
@@ -760,7 +761,8 @@ pub fn token_totals(
 ) -> Result<(u64, u64)> {
     let mut sql = String::from(
         "SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(gen_tokens), 0) FROM request_records \
-         WHERE kind = 'http' AND api_format != 'passthrough' AND outcome = 'completed' AND started_at >= ?1 AND started_at < ?2",
+         WHERE kind = 'http' AND api_format NOT IN ('passthrough', 'cloud_passthrough') AND outcome = 'completed' \
+         AND started_at >= ?1 AND started_at < ?2",
     );
     let mut args: Vec<Box<dyn ToSql>> = vec![Box::new(ms(from)), Box::new(ms(to))];
     if let Some(backend) = backend {
@@ -852,8 +854,8 @@ pub fn body_count(conn: &Connection) -> Result<u64> {
     Ok(n as u64)
 }
 
-/// Counts for the Security tab's summary tiles: findings, blocked requests and cloud-routed inference
-/// requests since `since`.
+/// Counts for the Security tab's summary tiles: findings, blocked requests and requests whose prompt left
+/// the machine (cloud-routed inference and scanned cloud passthrough) since `since`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct ActivitySummary {
     pub findings: u64,

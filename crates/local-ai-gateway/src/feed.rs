@@ -64,8 +64,12 @@ pub fn feed_line(record: &RequestRecord) -> String {
         Outcome::Completed => {
             let tok = if record.tokens_estimated { "~" } else { "" };
             let tim = if record.timings_estimated { "~" } else { "" };
+            let usd = record
+                .actual_cost_usd
+                .map(|v| format!(" usd={v:.4}"))
+                .unwrap_or_default();
             format!(
-                "{head} | prompt={tok}{} gen={tok}{} tok/s={tim}{} ttft={tim}{} total={:.1}s ({})",
+                "{head} | prompt={tok}{} gen={tok}{} tok/s={tim}{} ttft={tim}{} total={:.1}s ({}){usd}",
                 record
                     .prompt_tokens
                     .map_or("?".to_string(), |v| v.to_string()),
@@ -150,6 +154,8 @@ mod tests {
             finding_count: 0,
             max_severity: None,
             hypothetical_cost: BTreeMap::new(),
+            actual_cost_usd: None,
+            routed_by: None,
         }
     }
 
@@ -162,6 +168,12 @@ mod tests {
             ),
             "{line}"
         );
+        let mut priced = record(Outcome::Completed);
+        priced.backend = Backend::Anthropic;
+        priced.actual_cost_usd = Some(0.01234);
+        let line = feed_line(&priced);
+        assert!(line.contains(" anthropic qwen3:14b | "), "{line}");
+        assert!(line.ends_with("(stop) usd=0.0123"), "{line}");
         let line = feed_line(&record(Outcome::Failed {
             status: 429,
             source: FailureSource::Upstream,

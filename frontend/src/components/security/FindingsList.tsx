@@ -53,7 +53,7 @@ export default function FindingsList() {
           ))}
         </select>
         <select className={select} value={filter.backend} onChange={(e) => set('backend', e.target.value as Backend | '')} aria-label="backend">
-          <option value="">both backends</option>
+          <option value="">all backends</option>
           {(Object.keys(BACKEND_NAMES) as Backend[]).map((b) => (
             <option key={b} value={b}>
               {BACKEND_NAMES[b]}

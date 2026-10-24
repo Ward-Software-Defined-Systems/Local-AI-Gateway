@@ -49,7 +49,7 @@ export default function Filters({ value, onChange }: { value: FilterState; onCha
         ))}
       </select>
       <select className={select} value={value.backend} onChange={(e) => set('backend', e.target.value as Backend | '')} aria-label="backend">
-        <option value="">both backends</option>
+        <option value="">all backends</option>
         {(Object.keys(BACKEND_NAMES) as Backend[]).map((b) => (
           <option key={b} value={b}>
             {BACKEND_NAMES[b]}

@@ -778,6 +778,8 @@ impl Finisher {
             finding_count: findings.len() as u32,
             max_severity: findings.iter().map(|f| f.severity).max(),
             hypothetical_cost,
+            actual_cost_usd: None,
+            routed_by: None,
         };
         complete(&st, record, bodies, findings).await;
     }
@@ -936,6 +938,8 @@ async fn finish_failed(
         finding_count: findings.len() as u32,
         max_severity: findings.iter().map(|f| f.severity).max(),
         hypothetical_cost: Default::default(),
+        actual_cost_usd: None,
+        routed_by: None,
     };
     complete(st, record, bodies, findings).await;
 }
@@ -989,6 +993,8 @@ pub async fn finish_simple(
         finding_count: 0,
         max_severity: None::<Severity>,
         hypothetical_cost: Default::default(),
+        actual_cost_usd: None,
+        routed_by: None,
     };
     complete(st, record, Vec::new(), Vec::new()).await;
 }

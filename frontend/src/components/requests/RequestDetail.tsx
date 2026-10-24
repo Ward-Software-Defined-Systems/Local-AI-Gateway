@@ -47,6 +47,7 @@ function Overview({ detail }: { detail: Detail }) {
       <Row label="id">{r.id}</Row>
       <Row label="backend">
         {BACKEND_NAMES[r.backend]} via {r.listener}
+        {r.routed_by && r.routed_by !== 'listener' ? ` · routed by ${r.routed_by.replace('_', ' ')}` : ''}
       </Row>
       <Row label="request">
         {r.method} {r.path}
@@ -84,8 +85,9 @@ function Overview({ detail }: { detail: Detail }) {
       <Row label="bytes">
         {formatBytes(r.request_bytes)} in / {formatBytes(r.response_bytes)} out
       </Row>
+      {r.actual_cost_usd !== null && <Row label="cost">{formatUsd(r.actual_cost_usd)} at the provider's list price</Row>}
       {costs.length > 0 && (
-        <Row label="cost at list price">
+        <Row label="hypothetical cost">
           {costs.map(([k, v]) => `${k} ${formatUsd(v)}`).join(' · ')}
         </Row>
       )}

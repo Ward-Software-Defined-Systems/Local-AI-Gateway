@@ -173,7 +173,7 @@ pub fn error_body(
             "type": "error",
             "error": {"type": anthropic_error_type(status), "message": message}
         }),
-        ApiFormat::Passthrough => {
+        ApiFormat::Passthrough | ApiFormat::CloudPassthrough => {
             return (
                 HeaderValue::from_static("text/plain; charset=utf-8"),
                 Bytes::from(format!("{message}\n")),

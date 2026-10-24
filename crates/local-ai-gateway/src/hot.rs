@@ -295,6 +295,9 @@ pub fn restart_required(boot: &Config, next: &Config) -> Vec<String> {
             out.push(format!("backends.{}", backend.as_str()));
         }
     }
+    if boot.unified.enabled != next.unified.enabled || boot.unified.listen != next.unified.listen {
+        out.push("unified.listen".to_string());
+    }
     if boot.hardware != next.hardware {
         out.push("hardware".to_string());
     }

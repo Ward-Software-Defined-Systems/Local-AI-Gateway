@@ -155,7 +155,7 @@ pub fn select(
     let json = ct.contains("application/json");
     let streamed = sse || (!json && request_streamed);
     Some(match format {
-        ApiFormat::Passthrough => return None,
+        ApiFormat::Passthrough | ApiFormat::CloudPassthrough => return None,
         // Ollama streams by default: NDJSON or no content type means a stream; plain JSON is one object.
         ApiFormat::OllamaNative => Box::new(ollama::OllamaParser::new(ndjson || !json)),
         ApiFormat::OllamaEmbeddings => Box::new(embeddings::EmbeddingsParser::new(

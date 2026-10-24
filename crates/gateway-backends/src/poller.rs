@@ -41,6 +41,11 @@ pub async fn run(
     let client = match cfg.backend {
         Backend::LmStudio => crate::lmstudio::build_client(),
         Backend::Ollama => crate::ollama::build_client(),
+        other => {
+            // The gateway holds no provider keys, so there is nothing it could poll.
+            warn!(backend = %other, "cloud providers are not polled; poller not started");
+            return;
+        }
     };
     let client = match client {
         Ok(c) => c,
@@ -84,6 +89,7 @@ pub async fn run(
             Backend::Ollama => {
                 crate::ollama::snapshot(&client, &cfg.upstream, previous_models, Utc::now()).await
             }
+            Backend::Anthropic | Backend::Gemini | Backend::OpenAi => break,
         };
 
         let changed = previous.as_ref().is_none_or(|p| {

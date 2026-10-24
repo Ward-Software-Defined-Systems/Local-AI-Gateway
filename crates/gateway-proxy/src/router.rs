@@ -27,6 +27,8 @@ pub fn classify(backend: Backend, method: &Method, path: &str) -> ApiFormat {
                 "/api/v0/embeddings" => ApiFormat::LmStudioEmbeddings,
                 _ => ApiFormat::Passthrough,
             },
+            // The cloud providers serve the `/v1` family above; their own paths arrive with Gemini.
+            Backend::Anthropic | Backend::Gemini | Backend::OpenAi => ApiFormat::Passthrough,
         },
     }
 }

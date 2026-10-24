@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::routing::{MAX_MODEL_REF_LEN, ModelRef, provider_id};
 use crate::types::{Backend, DlpAction, ResponseAction, Severity};
 
 /// A commented `config.toml` holding every default, written by `config init`. A test keeps it equal to
@@ -25,6 +26,8 @@ pub const SAMPLE: &str = include_str!("../config.sample.toml");
 pub struct Config {
     pub dashboard: DashboardConfig,
     pub backends: BackendsConfig,
+    /// The listener that routes each request to a backend by model name.
+    pub unified: UnifiedConfig,
     pub capture: CaptureConfig,
     pub dlp: DlpConfig,
     pub alerts: AlertsConfig,
@@ -83,10 +86,16 @@ impl TlsMode {
 // backends
 // ---------------------------------------------------------------------------------------------------------
 
+/// One table per backend: the two local servers and the three cloud providers. The cloud providers are
+/// enabled by default with no listener of their own, so they are reachable through the unified listener
+/// and nothing else until an operator gives them a port.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BackendsConfig {
     pub lmstudio: BackendConfig,
     pub ollama: BackendConfig,
+    pub anthropic: BackendConfig,
+    pub gemini: BackendConfig,
+    pub openai: BackendConfig,
 }
 
 impl Default for BackendsConfig {
@@ -94,6 +103,9 @@ impl Default for BackendsConfig {
         Self {
             lmstudio: BackendConfig::defaults_for(Backend::LmStudio),
             ollama: BackendConfig::defaults_for(Backend::Ollama),
+            anthropic: BackendConfig::defaults_for(Backend::Anthropic),
+            gemini: BackendConfig::defaults_for(Backend::Gemini),
+            openai: BackendConfig::defaults_for(Backend::OpenAi),
         }
     }
 }
@@ -103,6 +115,9 @@ impl BackendsConfig {
         match backend {
             Backend::LmStudio => &self.lmstudio,
             Backend::Ollama => &self.ollama,
+            Backend::Anthropic => &self.anthropic,
+            Backend::Gemini => &self.gemini,
+            Backend::OpenAi => &self.openai,
         }
     }
 
@@ -121,6 +136,9 @@ impl BackendsConfig {
 struct BackendsPatch {
     lmstudio: BackendPatch,
     ollama: BackendPatch,
+    anthropic: BackendPatch,
+    gemini: BackendPatch,
+    openai: BackendPatch,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -143,6 +161,9 @@ impl<'de> Deserialize<'de> for BackendsConfig {
         Ok(Self {
             lmstudio: BackendConfig::defaults_for(Backend::LmStudio).apply(patch.lmstudio),
             ollama: BackendConfig::defaults_for(Backend::Ollama).apply(patch.ollama),
+            anthropic: BackendConfig::defaults_for(Backend::Anthropic).apply(patch.anthropic),
+            gemini: BackendConfig::defaults_for(Backend::Gemini).apply(patch.gemini),
+            openai: BackendConfig::defaults_for(Backend::OpenAi).apply(patch.openai),
         })
     }
 }
@@ -150,13 +171,18 @@ impl<'de> Deserialize<'de> for BackendsConfig {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BackendConfig {
     pub enabled: bool,
-    /// Every address the gateway listens on for this backend's clients.
+    /// Every address the gateway listens on for this backend's clients. Empty means the backend is only
+    /// reachable through the unified listener, which is the cloud providers' default.
     pub listen: Vec<SocketAddr>,
-    /// Where the backend itself serves, as an `http://` or `https://` URL.
+    /// Where the backend itself serves, as an `http://` or `https://` URL. A cloud provider's upstream
+    /// must be `https://` unless it is on loopback.
     pub upstream: String,
     pub capture_bodies: bool,
     pub record_passthrough: bool,
+    /// Add `stream_options.include_usage` to streaming OpenAI-format requests so the final frame carries
+    /// token counts. Off for Gemini until a capture shows its OpenAI-compatible endpoint accepts it.
     pub rewrite_include_usage: bool,
+    /// Local backends only: seconds between model-list polls. Cloud providers are not polled.
     pub poll_interval_secs: u64,
     /// LM Studio only: the `lms` CLI, for version lookup on Linux.
     pub lms_bin: Option<PathBuf>,
@@ -166,17 +192,25 @@ pub struct BackendConfig {
 
 impl BackendConfig {
     pub fn defaults_for(backend: Backend) -> Self {
-        let (listen_port, upstream_port) = match backend {
-            Backend::LmStudio => (1235, 1234),
-            Backend::Ollama => (11435, 11434),
+        let loopback = |port: u16| vec![SocketAddr::from(([127, 0, 0, 1], port))];
+        let (listen, upstream, rewrite_include_usage) = match backend {
+            Backend::LmStudio => (loopback(1235), "http://127.0.0.1:1234".to_string(), true),
+            Backend::Ollama => (loopback(11435), "http://127.0.0.1:11434".to_string(), true),
+            Backend::Anthropic => (Vec::new(), "https://api.anthropic.com".to_string(), true),
+            Backend::Gemini => (
+                Vec::new(),
+                "https://generativelanguage.googleapis.com".to_string(),
+                false,
+            ),
+            Backend::OpenAi => (Vec::new(), "https://api.openai.com".to_string(), true),
         };
         Self {
             enabled: true,
-            listen: vec![SocketAddr::from(([127, 0, 0, 1], listen_port))],
-            upstream: format!("http://127.0.0.1:{upstream_port}"),
+            listen,
+            upstream,
             capture_bodies: true,
             record_passthrough: true,
-            rewrite_include_usage: true,
+            rewrite_include_usage,
             poll_interval_secs: 2,
             lms_bin: None,
             app_path: None,
@@ -212,6 +246,55 @@ impl BackendConfig {
             self.app_path = patch.app_path;
         }
         self
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// unified listener
+// ---------------------------------------------------------------------------------------------------------
+
+/// The listener that serves every backend on one port and picks the target per request: an explicit path
+/// prefix or a provider-specific path family first, then the `model` (alias, live local model lists,
+/// `provider/model` spelling, `routes`, the built-in `claude-*` / `gemini-*` / `gpt-*` patterns), then a
+/// provider header, then `default_backend`. The addresses need a restart; everything else reloads live.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UnifiedConfig {
+    pub enabled: bool,
+    pub listen: Vec<SocketAddr>,
+    /// Where a request goes when nothing else decides.
+    pub default_backend: Backend,
+    /// Alias → model reference, e.g. `fast = "ollama/gemma4:12b-mlx"`. The alias is rewritten to its
+    /// target in the forwarded request.
+    pub aliases: BTreeMap<String, String>,
+    /// Operator model-prefix routes, consulted after aliases and the live model lists.
+    pub routes: Vec<RouteRule>,
+}
+
+impl Default for UnifiedConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen: vec![SocketAddr::from(([127, 0, 0, 1], 4000))],
+            default_backend: Backend::LmStudio,
+            aliases: BTreeMap::new(),
+            routes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteRule {
+    /// Case-insensitive prefix of the requested model; the longest matching prefix wins.
+    pub model_prefix: String,
+    pub backend: Backend,
+}
+
+impl UnifiedConfig {
+    /// The hot-reloadable part: everything but `enabled` and `listen`.
+    pub fn routing_part(&self) -> (Backend, &BTreeMap<String, String>, &[RouteRule]) {
+        (self.default_backend, &self.aliases, &self.routes)
     }
 }
 
@@ -563,9 +646,11 @@ impl Config {
         }
 
         let mut listeners: Vec<(String, SocketAddr)> = vec![("dashboard.listen".to_string(), dash)];
+        // (config key, host, port) of every enabled upstream, for the unified listener's self-proxy check.
+        let mut upstreams: Vec<(String, String, u16)> = Vec::new();
         for (backend, cfg) in self.backends.iter() {
             let key = format!("backends.{backend}");
-            if backend == Backend::Ollama && (cfg.lms_bin.is_some() || cfg.app_path.is_some()) {
+            if backend != Backend::LmStudio && (cfg.lms_bin.is_some() || cfg.app_path.is_some()) {
                 issues.push(Issue::warning(format!(
                     "{key}.lms_bin and {key}.app_path only apply to LM Studio and are ignored"
                 )));
@@ -573,10 +658,16 @@ impl Config {
             if !cfg.enabled {
                 continue;
             }
-            if cfg.listen.is_empty() {
-                issues.push(Issue::error(format!(
-                    "{key}.listen must name at least one address while the backend is enabled"
-                )));
+            if cfg.listen.is_empty() && !self.unified.enabled {
+                if backend.is_local() {
+                    issues.push(Issue::error(format!(
+                        "{key}.listen must name at least one address while the backend is enabled and [unified] is disabled"
+                    )));
+                } else {
+                    issues.push(Issue::warning(format!(
+                        "{key} is enabled but reachable from no listener: it has no listen address and [unified] is disabled"
+                    )));
+                }
             }
             match upstream_host_port(&cfg.upstream) {
                 None => issues.push(Issue::error(format!(
@@ -584,6 +675,15 @@ impl Config {
                     cfg.upstream
                 ))),
                 Some((host, port)) => {
+                    if backend.is_cloud_provider()
+                        && is_plain_http(&cfg.upstream)
+                        && !host_is_loopback(&host)
+                    {
+                        issues.push(Issue::error(format!(
+                            "{key}.upstream {} is plain http:// to a host off this machine: API keys would cross the network unencrypted",
+                            cfg.upstream
+                        )));
+                    }
                     for addr in &cfg.listen {
                         if addr.port() == port && host_overlaps(&host, addr.ip()) {
                             issues.push(Issue::error(format!(
@@ -592,9 +692,10 @@ impl Config {
                             )));
                         }
                     }
+                    upstreams.push((key.clone(), host, port));
                 }
             }
-            if cfg.poll_interval_secs == 0 {
+            if backend.is_local() && cfg.poll_interval_secs == 0 {
                 issues.push(Issue::error(format!(
                     "{key}.poll_interval_secs must be at least 1"
                 )));
@@ -603,6 +704,101 @@ impl Config {
                 listeners.push((format!("{key}.listen"), *addr));
             }
         }
+
+        let unified = &self.unified;
+        if unified.enabled {
+            if unified.listen.is_empty() {
+                issues.push(Issue::error(
+                    "unified.listen must name at least one address while [unified] is enabled",
+                ));
+            }
+            for addr in &unified.listen {
+                for (key, host, port) in &upstreams {
+                    if addr.port() == *port && host_overlaps(host, addr.ip()) {
+                        issues.push(Issue::error(format!(
+                            "unified.listen {addr} is the same socket as {key}.upstream: the gateway would proxy to itself"
+                        )));
+                    }
+                }
+                listeners.push(("unified.listen".to_string(), *addr));
+            }
+            if !self.backends.get(unified.default_backend).enabled {
+                issues.push(Issue::error(format!(
+                    "unified.default_backend = {:?} names a disabled backend",
+                    unified.default_backend.as_str()
+                )));
+            }
+        }
+        let mut alias_names: Vec<String> = Vec::new();
+        for (name, target) in &unified.aliases {
+            let alias_key = format!("unified.aliases.{name}");
+            let name = name.trim();
+            if name.is_empty()
+                || name.len() > MAX_MODEL_REF_LEN
+                || name.chars().any(|c| c.is_whitespace() || c.is_control())
+            {
+                issues.push(Issue::error(format!(
+                    "{alias_key}: alias names are 1 to {MAX_MODEL_REF_LEN} bytes with no whitespace or control characters"
+                )));
+            }
+            if provider_id(name).is_some() {
+                issues.push(Issue::error(format!(
+                    "{alias_key}: an alias may not be named after a backend"
+                )));
+            }
+            let lower = name.to_ascii_lowercase();
+            if alias_names.contains(&lower) {
+                issues.push(Issue::error(format!(
+                    "{alias_key} is a duplicate of another alias differing only in case"
+                )));
+            }
+            alias_names.push(lower);
+            match ModelRef::parse(target) {
+                Err(err) => issues.push(Issue::error(format!("{alias_key}: {err}"))),
+                Ok(target) => {
+                    if let Some(backend) = target.backend
+                        && !self.backends.get(backend).enabled
+                    {
+                        issues.push(Issue::error(format!(
+                            "{alias_key} points at {backend}, which is disabled"
+                        )));
+                    }
+                    if unified
+                        .aliases
+                        .keys()
+                        .any(|other| other.trim().eq_ignore_ascii_case(&target.model))
+                    {
+                        issues.push(Issue::error(format!(
+                            "{alias_key}: an alias may not point at another alias ({:?})",
+                            target.model
+                        )));
+                    }
+                }
+            }
+        }
+        let mut prefixes: Vec<String> = Vec::new();
+        for (i, route) in unified.routes.iter().enumerate() {
+            let prefix = route.model_prefix.trim().to_ascii_lowercase();
+            if prefix.is_empty() {
+                issues.push(Issue::error(format!(
+                    "unified.routes[{i}].model_prefix is empty"
+                )));
+            }
+            if !self.backends.get(route.backend).enabled {
+                issues.push(Issue::error(format!(
+                    "unified.routes[{i}] names {}, which is disabled",
+                    route.backend
+                )));
+            }
+            if prefixes.contains(&prefix) {
+                issues.push(Issue::warning(format!(
+                    "unified.routes[{i}] repeats model_prefix {:?}; the first entry wins",
+                    route.model_prefix
+                )));
+            }
+            prefixes.push(prefix);
+        }
+
         for i in 0..listeners.len() {
             for j in (i + 1)..listeners.len() {
                 let (a, b) = (listeners[i].1, listeners[j].1);
@@ -631,7 +827,8 @@ impl Config {
         for key in self.dlp.backends.keys() {
             if key.parse::<Backend>().is_err() {
                 issues.push(Issue::error(format!(
-                    "dlp.backends.{key}: unknown backend (expected lmstudio or ollama)"
+                    "dlp.backends.{key}: unknown backend (expected one of {})",
+                    backend_ids()
                 )));
             }
         }
@@ -664,7 +861,8 @@ impl Config {
                 && backend.parse::<Backend>().is_err()
             {
                 issues.push(Issue::error(format!(
-                    "dlp.allowlist[{i}].backend {backend:?} is not lmstudio or ollama"
+                    "dlp.allowlist[{i}].backend {backend:?} is not one of {}",
+                    backend_ids()
                 )));
             }
         }
@@ -734,6 +932,25 @@ pub fn upstream_host_port(upstream: &str) -> Option<(String, u16)> {
         Some((host, port)) if !host.is_empty() => Some((host.to_string(), port.parse().ok()?)),
         _ => Some((authority.to_string(), default_port)),
     }
+}
+
+/// The backend ids as validation messages list them.
+fn backend_ids() -> String {
+    Backend::ALL
+        .iter()
+        .map(|b| b.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn is_plain_http(upstream: &str) -> bool {
+    upstream.trim().to_ascii_lowercase().starts_with("http://")
+}
+
+fn host_is_loopback(host: &str) -> bool {
+    host.parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or_else(|_| host.eq_ignore_ascii_case("localhost"))
 }
 
 /// Two bind addresses collide when they are equal or either is the unspecified address of a family that
@@ -852,6 +1069,146 @@ mod tests {
         assert!(errs[0].contains("same port"), "{errs:?}");
         let cfg = Config::parse("[dashboard]\nlisten = \"0.0.0.0:11435\"\n").unwrap();
         assert!(errors(&cfg)[0].contains("same port"));
+        let cfg = Config::parse("[unified]\nlisten = [\"0.0.0.0:8787\"]\n").unwrap();
+        let errs = errors(&cfg);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("unified.listen") && e.contains("same port")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn cloud_providers_default_to_no_listener_and_https_upstreams() {
+        let cfg = Config::default();
+        for backend in Backend::CLOUD_PROVIDERS {
+            let b = cfg.backends.get(backend);
+            assert!(b.enabled, "{backend}");
+            assert!(b.listen.is_empty(), "{backend}");
+            assert!(
+                b.upstream.starts_with("https://"),
+                "{backend}: {}",
+                b.upstream
+            );
+        }
+        assert!(cfg.backends.anthropic.rewrite_include_usage);
+        assert!(!cfg.backends.gemini.rewrite_include_usage);
+        assert!(cfg.backends.openai.rewrite_include_usage);
+        let cfg =
+            Config::parse("[backends.gemini]\nupstream = \"http://gemini.example.net\"\n").unwrap();
+        let errs = errors(&cfg);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("backends.gemini.upstream") && e.contains("unencrypted")),
+            "{errs:?}"
+        );
+        let cfg = Config::parse("[backends.gemini]\nupstream = \"http://127.0.0.1:9\"\n").unwrap();
+        assert!(
+            errors(&cfg).is_empty(),
+            "loopback http is fine for tests: {:?}",
+            errors(&cfg)
+        );
+        let cfg = Config::parse("[backends.openai]\nlms_bin = \"/x\"\n").unwrap();
+        assert!(
+            cfg.validate()
+                .iter()
+                .any(|i| i.message.contains("only apply to LM Studio"))
+        );
+    }
+
+    #[test]
+    fn an_empty_listen_needs_the_unified_listener() {
+        let cfg = Config::parse("[backends.ollama]\nlisten = []\n").unwrap();
+        assert!(errors(&cfg).is_empty(), "{:?}", errors(&cfg));
+        let cfg =
+            Config::parse("[backends.ollama]\nlisten = []\n[unified]\nenabled = false\n").unwrap();
+        let errs = errors(&cfg);
+        assert!(
+            errs.iter().any(|e| e.contains("backends.ollama.listen")),
+            "{errs:?}"
+        );
+        let cfg = Config::parse("[unified]\nenabled = false\n").unwrap();
+        assert!(errors(&cfg).is_empty(), "{:?}", errors(&cfg));
+        assert!(
+            cfg.validate().iter().any(|i| i.level == IssueLevel::Warning
+                && i.message
+                    .contains("backends.anthropic is enabled but reachable from no listener")),
+            "{:?}",
+            cfg.validate()
+        );
+        let cfg = Config::parse("[unified]\nlisten = []\n").unwrap();
+        assert!(errors(&cfg)[0].contains("unified.listen must name"));
+    }
+
+    #[test]
+    fn the_unified_listener_is_checked_against_every_upstream_and_its_default() {
+        let cfg = Config::parse("[unified]\nlisten = [\"127.0.0.1:11434\"]\n").unwrap();
+        let errs = errors(&cfg);
+        assert!(
+            errs.iter().any(|e| e.contains("unified.listen")
+                && e.contains("backends.ollama.upstream")
+                && e.contains("proxy to itself")),
+            "{errs:?}"
+        );
+        let cfg = Config::parse("[backends.lmstudio]\nenabled = false\n").unwrap();
+        let errs = errors(&cfg);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("unified.default_backend") && e.contains("disabled")),
+            "{errs:?}"
+        );
+        let cfg = Config::parse(
+            "[backends.lmstudio]\nenabled = false\n[unified]\ndefault_backend = \"ollama\"\n",
+        )
+        .unwrap();
+        assert!(errors(&cfg).is_empty(), "{:?}", errors(&cfg));
+    }
+
+    #[test]
+    fn aliases_and_routes_are_validated() {
+        let cfg = Config::parse(
+            "[unified.aliases]\nfast = \"ollama/gemma4:12b-mlx\"\nsmart = \"claude-opus-5-5\"\nopenai = \"gpt-5\"\nchain = \"fast\"\nbad = \"openai/\"\noff = \"openai/gpt-5\"\nFAST = \"ollama/x\"\n\"two words\" = \"x\"\n[backends.openai]\nenabled = false\n[[unified.routes]]\nmodel_prefix = \"mistral-\"\nbackend = \"ollama\"\n[[unified.routes]]\nmodel_prefix = \"\"\nbackend = \"openai\"\n[[unified.routes]]\nmodel_prefix = \"Mistral-\"\nbackend = \"lmstudio\"\n",
+        )
+        .unwrap();
+        let issues = cfg.validate();
+        let errs = errors(&cfg);
+        let has = |needle: &str| errs.iter().any(|e| e.contains(needle));
+        assert!(
+            has("unified.aliases.openai: an alias may not be named after a backend"),
+            "{errs:?}"
+        );
+        assert!(
+            has("unified.aliases.chain: an alias may not point at another alias"),
+            "{errs:?}"
+        );
+        assert!(
+            has("unified.aliases.bad: `openai/` names a provider but no model"),
+            "{errs:?}"
+        );
+        assert!(
+            has("unified.aliases.off points at openai, which is disabled"),
+            "{errs:?}"
+        );
+        assert!(has("differing only in case"), "{errs:?}");
+        assert!(has("unified.aliases.two words: alias names"), "{errs:?}");
+        assert!(has("unified.routes[1].model_prefix is empty"), "{errs:?}");
+        assert!(
+            has("unified.routes[1] names openai, which is disabled"),
+            "{errs:?}"
+        );
+        assert!(
+            issues.iter().any(|i| i.level == IssueLevel::Warning
+                && i.message.contains("unified.routes[2] repeats")),
+            "{issues:?}"
+        );
+        assert!(
+            !has("unified.aliases.fast:"),
+            "the duplicate note is the only complaint about fast: {errs:?}"
+        );
+        assert!(!has("unified.aliases.smart"), "{errs:?}");
+        let cfg = Config::parse("[unified.aliases]\nfast = \"ollama/gemma4:12b-mlx\"\n[[unified.routes]]\nmodel_prefix = \"mistral-\"\nbackend = \"ollama\"\n").unwrap();
+        assert!(errors(&cfg).is_empty(), "{:?}", errors(&cfg));
+        assert_eq!(cfg.unified.routes[0].backend, Backend::Ollama);
     }
 
     #[test]

@@ -32,7 +32,8 @@ pub struct RuleView {
     pub keywords: Vec<String>,
     pub min_entropy: Option<f32>,
     pub validator: Option<String>,
-    /// Effective request action per backend, plus `cloud` for Ollama cloud models.
+    /// Effective request action per backend (the cloud providers resolved as cloud egress), plus `cloud`
+    /// for Ollama cloud models.
     pub request_action: BTreeMap<String, DlpAction>,
     pub response_action: BTreeMap<String, ResponseAction>,
 }
@@ -61,9 +62,18 @@ pub async fn api_rules(State(st): State<AppState>) -> ApiResult<RulesView> {
         .iter()
         .map(|compiled| {
             let rule = &compiled.rule;
-            let lms = policy.resolve(rule, Backend::LmStudio, false);
             let ollama = policy.resolve(rule, Backend::Ollama, false);
-            let cloud = policy.resolve(rule, Backend::Ollama, true);
+            let mut request_action = BTreeMap::new();
+            let mut response_action = BTreeMap::new();
+            for backend in Backend::ALL {
+                let effective = policy.resolve(rule, backend, backend.is_cloud_provider());
+                request_action.insert(backend.as_str().to_string(), effective.request_action);
+                response_action.insert(backend.as_str().to_string(), effective.response_action);
+            }
+            request_action.insert(
+                "cloud".to_string(),
+                policy.resolve(rule, Backend::Ollama, true).request_action,
+            );
             RuleView {
                 id: rule.id.clone(),
                 description: rule.description.clone(),
@@ -77,15 +87,8 @@ pub async fn api_rules(State(st): State<AppState>) -> ApiResult<RulesView> {
                 validator: rule
                     .validator
                     .map(|v| format!("{v:?}").to_ascii_lowercase()),
-                request_action: BTreeMap::from([
-                    ("lmstudio".to_string(), lms.request_action),
-                    ("ollama".to_string(), ollama.request_action),
-                    ("cloud".to_string(), cloud.request_action),
-                ]),
-                response_action: BTreeMap::from([
-                    ("lmstudio".to_string(), lms.response_action),
-                    ("ollama".to_string(), ollama.response_action),
-                ]),
+                request_action,
+                response_action,
             }
         })
         .collect();
@@ -138,10 +141,12 @@ pub async fn api_test(
         )));
     }
     let engine = st.hot().engine();
+    let backend = body.backend.unwrap_or(Backend::Ollama);
     let input = ScanInput {
         request_id: Uuid::nil(),
-        backend: body.backend.unwrap_or(Backend::Ollama),
-        is_cloud: body.is_cloud.unwrap_or(false),
+        backend,
+        // A request to a cloud provider always leaves the machine, whatever the box says.
+        is_cloud: body.is_cloud.unwrap_or(false) || backend.is_cloud_provider(),
         direction: Direction::Request,
     };
     let out = engine.scan_request(&input, body.text.as_bytes());

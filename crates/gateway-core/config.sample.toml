@@ -41,6 +41,52 @@ record_passthrough = true
 rewrite_include_usage = true
 poll_interval_secs = 2
 
+# The cloud providers are backends too. They are enabled by default but have no listener of their own, so
+# requests reach them through the unified listener below. Clients send their own API keys; the gateway
+# forwards each key to the provider the request resolved to and never stores it. Every request to a cloud
+# provider counts as cloud egress for the DLP policy ([dlp.cloud]).
+[backends.anthropic]
+enabled = true
+listen = []
+upstream = "https://api.anthropic.com"
+capture_bodies = true
+record_passthrough = true
+rewrite_include_usage = true
+
+[backends.gemini]
+enabled = true
+listen = []
+upstream = "https://generativelanguage.googleapis.com"
+capture_bodies = true
+record_passthrough = true
+# Off until a capture shows Gemini's OpenAI-compatible endpoint accepts stream_options.
+rewrite_include_usage = false
+
+[backends.openai]
+enabled = true
+listen = []
+upstream = "https://api.openai.com"
+capture_bodies = true
+record_passthrough = true
+rewrite_include_usage = true
+
+# One listener for every backend. The target is picked per request: an explicit prefix (/anthropic/...,
+# /openai/..., /gemini/..., /lmstudio/..., /ollama/...) or a provider-specific path (/api/v0/*, /api/*,
+# /v1beta/*) first; then the model (an alias, the live LM Studio and Ollama model lists, a "provider/model"
+# spelling, the routes below, then claude-* / gemini-* / gpt-*); then a provider header; then
+# default_backend. The addresses need a restart; everything else reloads live.
+[unified]
+enabled = true
+listen = ["127.0.0.1:4000"]
+default_backend = "lmstudio"
+# Aliases are rewritten to their target in the forwarded request:
+# [unified.aliases]
+# fast = "ollama/gemma4:12b-mlx"
+# Operator prefix routes, consulted after aliases and the live model lists:
+# [[unified.routes]]
+# model_prefix = "mistral-"
+# backend = "ollama"
+
 [capture]
 # Per stored body; larger bodies are truncated and flagged.
 max_body_bytes = 4194304
@@ -65,7 +111,8 @@ known_secrets_file = "known-secrets.toml"
 max_scan_bytes = 8388608
 
 [dlp.cloud]
-# Requests routed to Ollama ":cloud" models leave the machine, so secrets are blocked by default.
+# Requests routed to Ollama ":cloud" models or to Anthropic, Gemini and OpenAI leave the machine, so
+# secrets in them are blocked by default.
 request_action = "block"
 pii_action = "alert"
 

@@ -202,10 +202,16 @@ CREATE TABLE IF NOT EXISTS models_seen (
 );
 "#;
 
-/// Every version in order. A new version is a new entry; existing entries are frozen.
-pub const MIGRATIONS: &[(u32, &str)] = &[(1, V1)];
+/// v2: the unified listener's routing decision and the real cost of requests to cloud providers.
+const V2: &str = r#"
+ALTER TABLE request_records ADD COLUMN actual_cost_usd REAL;
+ALTER TABLE request_records ADD COLUMN routed_by TEXT;
+"#;
 
-pub const CURRENT_VERSION: u32 = 1;
+/// Every version in order. A new version is a new entry; existing entries are frozen.
+pub const MIGRATIONS: &[(u32, &str)] = &[(1, V1), (2, V2)];
+
+pub const CURRENT_VERSION: u32 = 2;
 
 /// Per-connection pragmas. `auto_vacuum` only takes effect on a database that has no tables yet, which
 /// is exactly the first open; later it is a no-op. The pragmas run outside any transaction, as
@@ -290,12 +296,26 @@ mod tests {
             .collect()
     }
 
+    fn all_versions() -> Vec<i64> {
+        (1..=CURRENT_VERSION).map(i64::from).collect()
+    }
+
+    fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+        let mut stmt = conn
+            .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .any(|c| c == column)
+    }
+
     #[test]
     fn a_fresh_database_is_at_the_current_version_with_wal_and_fts() {
         let dir = tempfile::tempdir().unwrap();
         let path = temp_db_path(&dir);
         let conn = open_writer_connection(&path).unwrap();
-        assert_eq!(versions(&conn), vec![i64::from(CURRENT_VERSION)]);
+        assert_eq!(versions(&conn), all_versions());
         let journal: String = conn
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
@@ -326,7 +346,45 @@ mod tests {
         let mut again = Connection::open(&path).unwrap();
         configure(&again).unwrap();
         migrate(&mut again).unwrap();
-        assert_eq!(versions(&again), vec![i64::from(CURRENT_VERSION)]);
+        assert_eq!(versions(&again), all_versions());
+    }
+
+    /// A file written by the first release (v1 only) gains the v2 columns and keeps its rows.
+    #[test]
+    fn a_v1_file_migrates_to_v2_and_old_rows_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_db_path(&dir);
+        let mut conn = Connection::open(&path).unwrap();
+        configure(&conn).unwrap();
+        conn.execute_batch(V1).unwrap();
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (1, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO sessions (id, started_at, app_version) VALUES (1, 0, '0.1.0');
+             INSERT INTO request_records (id, session_id, backend, listener, kind, client_ip, method, path, api_format,
+                streamed, is_cloud, started_at, ended_at, outcome, total_ms, request_bytes, response_bytes,
+                request_headers, response_headers)
+             VALUES ('r1', 1, 'ollama', 'l', 'http', 'c', 'POST', '/api/chat', 'ollama_native', 1, 0, 1, 2, 'completed',
+                1.0, 0, 0, '[]', '[]');",
+        )
+        .unwrap();
+        assert!(!has_column(&conn, "request_records", "routed_by"));
+        assert_eq!(current_version(&conn).unwrap(), 1);
+        migrate(&mut conn).unwrap();
+        assert_eq!(versions(&conn), all_versions());
+        assert!(has_column(&conn, "request_records", "actual_cost_usd"));
+        assert!(has_column(&conn, "request_records", "routed_by"));
+        let (cost, routed): (Option<f64>, Option<String>) = conn
+            .query_row(
+                "SELECT actual_cost_usd, routed_by FROM request_records WHERE id = 'r1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((cost, routed), (None, None));
     }
 
     #[test]
