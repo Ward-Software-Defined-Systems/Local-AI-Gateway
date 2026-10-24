@@ -79,6 +79,15 @@ function deltaText(json: unknown, format: ApiFormat): string | null {
     }
     case 'openai_responses':
       return obj.type === 'response.output_text.delta' && typeof obj.delta === 'string' ? obj.delta : null
+    case 'gemini_generate': {
+      const candidates = obj.candidates as { content?: { parts?: { text?: unknown }[] } }[] | undefined
+      if (!Array.isArray(candidates)) return null
+      const parts = candidates
+        .flatMap((c) => c.content?.parts ?? [])
+        .map((p) => p.text)
+        .filter((t): t is string => typeof t === 'string')
+      return parts.length ? parts.join('') : null
+    }
     default: {
       const choices = obj.choices as { delta?: { content?: string }; text?: string; message?: { content?: string } }[] | undefined
       if (!Array.isArray(choices)) return null

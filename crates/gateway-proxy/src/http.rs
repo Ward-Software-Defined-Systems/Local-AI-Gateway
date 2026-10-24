@@ -105,8 +105,34 @@ pub fn request_fields(format: ApiFormat, body: &[u8]) -> RequestFields {
 /// characters. It comes from the client and is shown as it is.
 pub fn request_model(obj: &Map<String, Value>) -> Option<String> {
     let model = obj.get("model")?.as_str()?;
-    (!model.is_empty() && model.len() <= MAX_MODEL_NAME && !model.chars().any(char::is_control))
-        .then(|| model.to_string())
+    plausible_model(model).then(|| model.to_string())
+}
+
+fn plausible_model(model: &str) -> bool {
+    !model.is_empty() && model.len() <= MAX_MODEL_NAME && !model.chars().any(char::is_control)
+}
+
+/// `request_fields` with the request path at hand: Gemini names the model and the streaming choice in
+/// the path (`/v1beta/models/{model}:streamGenerateContent`), not in the body.
+pub fn request_fields_for(format: ApiFormat, path: &str, body: &[u8]) -> RequestFields {
+    match format {
+        ApiFormat::GeminiGenerate | ApiFormat::GeminiEmbed => {
+            let call = crate::router::gemini_call(path);
+            RequestFields {
+                model: call
+                    .as_ref()
+                    .map(|c| c.model.as_str())
+                    .filter(|m| plausible_model(m))
+                    .map(str::to_string),
+                streamed: format == ApiFormat::GeminiGenerate
+                    && call
+                        .as_ref()
+                        .is_some_and(|c| c.method == "streamGenerateContent"),
+                json: serde_json::from_slice::<Value>(body).ok(),
+            }
+        }
+        _ => request_fields(format, body),
+    }
 }
 
 /// For streaming `/v1/chat/completions`, `/v1/completions` and LM Studio `/api/v0/chat/completions`
@@ -214,6 +240,9 @@ pub fn error_body(
             "type": "error",
             "error": {"type": anthropic_error_type(status), "message": message}
         }),
+        ApiFormat::GeminiGenerate | ApiFormat::GeminiEmbed => json!({
+            "error": {"code": status.as_u16(), "message": message, "status": google_status(status)}
+        }),
         ApiFormat::Passthrough | ApiFormat::CloudPassthrough => {
             return (
                 HeaderValue::from_static("text/plain; charset=utf-8"),
@@ -231,6 +260,17 @@ fn anthropic_error_type(status: StatusCode) -> &'static str {
         403 => "permission_error",
         502 | 503 => "api_error",
         _ => "api_error",
+    }
+}
+
+/// Google's `status` names for the statuses the gateway itself answers with.
+fn google_status(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        400 | 413 => "INVALID_ARGUMENT",
+        403 => "PERMISSION_DENIED",
+        404 => "NOT_FOUND",
+        502 | 503 => "UNAVAILABLE",
+        _ => "INTERNAL",
     }
 }
 
@@ -429,6 +469,57 @@ mod tests {
         );
         assert_eq!(ct, "text/plain; charset=utf-8");
         assert_eq!(body, Bytes::from("upstream unreachable\n"));
+    }
+
+    #[test]
+    fn gemini_requests_take_model_and_streaming_from_the_path() {
+        let fields = request_fields_for(
+            ApiFormat::GeminiGenerate,
+            "/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent",
+            br#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#,
+        );
+        assert_eq!(fields.model.as_deref(), Some("gemini-3.1-pro-preview"));
+        assert!(fields.streamed);
+        assert!(fields.json.is_some());
+        let fields = request_fields_for(
+            ApiFormat::GeminiGenerate,
+            "/v1beta/models/gemini-3-flash:generateContent",
+            b"{}",
+        );
+        assert_eq!(fields.model.as_deref(), Some("gemini-3-flash"));
+        assert!(!fields.streamed);
+        let fields = request_fields_for(
+            ApiFormat::GeminiEmbed,
+            "/v1beta/models/gemini-embedding-2:embedContent",
+            b"{}",
+        );
+        assert_eq!(fields.model.as_deref(), Some("gemini-embedding-2"));
+        assert!(!fields.streamed, "embeddings never stream");
+        let fields = request_fields_for(
+            ApiFormat::OpenAiChat,
+            "/v1/chat/completions",
+            br#"{"model":"gpt-5","messages":[],"stream":true}"#,
+        );
+        assert_eq!(fields.model.as_deref(), Some("gpt-5"));
+        assert!(fields.streamed, "other formats read the body as before");
+    }
+
+    #[test]
+    fn gemini_error_bodies_use_googles_shape() {
+        let (ct, body) = error_body(
+            ApiFormat::GeminiGenerate,
+            StatusCode::FORBIDDEN,
+            "blocked",
+            "dlp_blocked",
+        );
+        assert_eq!(ct, "application/json");
+        assert_eq!(
+            val(&body),
+            json!({"error": {"code": 403, "message": "blocked", "status": "PERMISSION_DENIED"}})
+        );
+        let (_, body) = error_body(ApiFormat::GeminiEmbed, StatusCode::BAD_GATEWAY, "down", "x");
+        assert_eq!(val(&body)["error"]["status"], json!("UNAVAILABLE"));
+        assert_eq!(val(&body)["error"]["code"], json!(502));
     }
 
     #[tokio::test]

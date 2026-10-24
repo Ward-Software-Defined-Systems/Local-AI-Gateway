@@ -295,6 +295,12 @@ pub enum ApiFormat {
     /// LM Studio `/api/v0/embeddings`.
     #[serde(rename = "lmstudio_embeddings")]
     LmStudioEmbeddings,
+    /// Gemini `/v1beta/models/{model}:generateContent` and `:streamGenerateContent`.
+    #[serde(rename = "gemini_generate")]
+    GeminiGenerate,
+    /// Gemini `:embedContent` and `:batchEmbedContents`.
+    #[serde(rename = "gemini_embed")]
+    GeminiEmbed,
     /// Everything else, recorded as metadata only.
     #[serde(rename = "passthrough")]
     Passthrough,
@@ -306,7 +312,7 @@ pub enum ApiFormat {
 }
 
 impl ApiFormat {
-    pub const ALL: [ApiFormat; 11] = [
+    pub const ALL: [ApiFormat; 13] = [
         ApiFormat::OllamaNative,
         ApiFormat::OllamaEmbeddings,
         ApiFormat::OpenAiChat,
@@ -316,6 +322,8 @@ impl ApiFormat {
         ApiFormat::AnthropicMessages,
         ApiFormat::LmStudioNative,
         ApiFormat::LmStudioEmbeddings,
+        ApiFormat::GeminiGenerate,
+        ApiFormat::GeminiEmbed,
         ApiFormat::Passthrough,
         ApiFormat::CloudPassthrough,
     ];
@@ -331,6 +339,8 @@ impl ApiFormat {
             ApiFormat::AnthropicMessages => "anthropic_messages",
             ApiFormat::LmStudioNative => "lmstudio_native",
             ApiFormat::LmStudioEmbeddings => "lmstudio_embeddings",
+            ApiFormat::GeminiGenerate => "gemini_generate",
+            ApiFormat::GeminiEmbed => "gemini_embed",
             ApiFormat::Passthrough => "passthrough",
             ApiFormat::CloudPassthrough => "cloud_passthrough",
         }
@@ -352,6 +362,7 @@ impl ApiFormat {
             ApiFormat::OllamaEmbeddings
                 | ApiFormat::OpenAiEmbeddings
                 | ApiFormat::LmStudioEmbeddings
+                | ApiFormat::GeminiEmbed
         )
     }
 

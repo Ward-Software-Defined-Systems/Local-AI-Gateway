@@ -10,6 +10,7 @@
 
 pub mod anthropic;
 pub mod embeddings;
+pub mod gemini;
 pub mod line_buffer;
 pub mod ollama;
 pub mod openai;
@@ -177,6 +178,17 @@ pub fn select(
         ),
         ApiFormat::OpenAiResponses => Box::new(responses::ResponsesParser::new(streamed)),
         ApiFormat::AnthropicMessages => Box::new(anthropic::AnthropicParser::new(streamed)),
+        // `streamGenerateContent` without `alt=sse` is a JSON array written chunk by chunk.
+        ApiFormat::GeminiGenerate => Box::new(gemini::GeminiParser::new(if sse {
+            gemini::Mode::Sse
+        } else if request_streamed {
+            gemini::Mode::Array
+        } else {
+            gemini::Mode::Single
+        })),
+        ApiFormat::GeminiEmbed => Box::new(embeddings::EmbeddingsParser::new(
+            embeddings::Flavor::Gemini,
+        )),
     })
 }
 

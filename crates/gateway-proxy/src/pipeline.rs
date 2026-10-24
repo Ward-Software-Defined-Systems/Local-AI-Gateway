@@ -341,7 +341,7 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
         }
     };
     meta.request_bytes = body.len() as u64;
-    let fields = http::request_fields(meta.api_format, &body);
+    let fields = http::request_fields_for(meta.api_format, &meta.forward_path, &body);
     meta.model_requested = fields.model.clone();
     meta.streamed = fields.streamed;
     meta.is_cloud = meta.backend.is_cloud_provider()

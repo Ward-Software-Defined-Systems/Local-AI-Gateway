@@ -12,6 +12,8 @@ export type ApiFormat =
   | 'anthropic_messages'
   | 'lmstudio_native'
   | 'lmstudio_embeddings'
+  | 'gemini_generate'
+  | 'gemini_embed'
   | 'passthrough'
   | 'cloud_passthrough'
 export type RequestKind = 'http' | 'upgrade' | 'load'
@@ -371,6 +373,8 @@ export const API_FORMATS: ApiFormat[] = [
   'anthropic_messages',
   'lmstudio_native',
   'lmstudio_embeddings',
+  'gemini_generate',
+  'gemini_embed',
   'passthrough',
   'cloud_passthrough',
 ]

@@ -1,15 +1,49 @@
 //! Which API format a request speaks, from its backend, method and path. Exact segment matches after
 //! trimming a trailing slash (gin redirects `/api/chat/` to `/api/chat`); Ollama-Monitor's `contains`
-//! matching also caught unrelated paths. Anything unknown is `Passthrough`: forwarded, never parsed.
+//! matching also caught unrelated paths. Gemini's own paths carry the model and the method in the path
+//! (`/v1beta/models/{model}:streamGenerateContent`), and its OpenAI-compatible surface under
+//! `/v1beta/openai/` is the `/v1` family under another prefix. Anything unknown is `Passthrough`:
+//! forwarded, never parsed.
 
 use axum::http::{HeaderMap, Method, header};
 use gateway_core::types::{ApiFormat, Backend};
+
+/// A Gemini method call: `/v1beta/models/{model}:{method}` (or under `/v1/`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeminiCall {
+    pub model: String,
+    pub method: String,
+}
+
+pub fn gemini_call(path: &str) -> Option<GeminiCall> {
+    let path = path.trim_end_matches('/');
+    let rest = path
+        .strip_prefix("/v1beta/models/")
+        .or_else(|| path.strip_prefix("/v1/models/"))?;
+    let (model, method) = rest.rsplit_once(':')?;
+    (!model.is_empty() && !method.is_empty() && !model.contains('/') && !method.contains('/')).then(
+        || GeminiCall {
+            model: model.to_string(),
+            method: method.to_string(),
+        },
+    )
+}
+
+/// Gemini's OpenAI-compatible paths, spelled as the `/v1` family they are.
+fn gemini_compat_path(path: &str) -> Option<String> {
+    path.strip_prefix("/v1beta/openai/")
+        .map(|rest| format!("/v1/{rest}"))
+}
 
 pub fn classify(backend: Backend, method: &Method, path: &str) -> ApiFormat {
     if method != Method::POST {
         return ApiFormat::Passthrough;
     }
     let path = path.trim_end_matches('/');
+    let compat = (backend == Backend::Gemini)
+        .then(|| gemini_compat_path(path))
+        .flatten();
+    let path = compat.as_deref().unwrap_or(path);
     match path {
         "/v1/chat/completions" => ApiFormat::OpenAiChat,
         "/v1/completions" => ApiFormat::OpenAiCompletions,
@@ -27,8 +61,17 @@ pub fn classify(backend: Backend, method: &Method, path: &str) -> ApiFormat {
                 "/api/v0/embeddings" => ApiFormat::LmStudioEmbeddings,
                 _ => ApiFormat::Passthrough,
             },
-            // The cloud providers serve the `/v1` family above; their own paths arrive with Gemini.
-            Backend::Anthropic | Backend::Gemini | Backend::OpenAi => ApiFormat::Passthrough,
+            Backend::Gemini => match gemini_call(path) {
+                Some(call) => match call.method.as_str() {
+                    "generateContent" | "streamGenerateContent" => ApiFormat::GeminiGenerate,
+                    "embedContent" | "batchEmbedContents" => ApiFormat::GeminiEmbed,
+                    // countTokens and the rest carry no generation; they are scanned as cloud passthrough.
+                    _ => ApiFormat::Passthrough,
+                },
+                None => ApiFormat::Passthrough,
+            },
+            // Anthropic and OpenAI serve only the `/v1` family above.
+            Backend::Anthropic | Backend::OpenAi => ApiFormat::Passthrough,
         },
     }
 }
@@ -131,6 +174,82 @@ mod tests {
         assert_eq!(
             classify(Backend::LmStudio, &post, "/api/chat"),
             ApiFormat::Passthrough
+        );
+    }
+
+    #[test]
+    fn gemini_paths_classify_by_their_method_and_compat_paths_as_the_v1_family() {
+        let post = Method::POST;
+        assert_eq!(
+            gemini_call("/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent"),
+            Some(GeminiCall {
+                model: "gemini-3.1-pro-preview".into(),
+                method: "streamGenerateContent".into()
+            })
+        );
+        assert_eq!(
+            gemini_call("/v1/models/gemini-3-flash:generateContent/").map(|c| c.method),
+            Some("generateContent".into())
+        );
+        assert_eq!(
+            gemini_call("/v1/models/gpt-5"),
+            None,
+            "no method, no Gemini call"
+        );
+        assert_eq!(gemini_call("/v1beta/models/:generateContent"), None);
+        assert_eq!(gemini_call("/v1beta/models/a/b:generateContent"), None);
+        for (path, expected) in [
+            (
+                "/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent",
+                ApiFormat::GeminiGenerate,
+            ),
+            (
+                "/v1beta/models/gemini-3-flash:generateContent",
+                ApiFormat::GeminiGenerate,
+            ),
+            (
+                "/v1beta/models/gemini-embedding-2:embedContent",
+                ApiFormat::GeminiEmbed,
+            ),
+            (
+                "/v1beta/models/gemini-embedding-2:batchEmbedContents",
+                ApiFormat::GeminiEmbed,
+            ),
+            (
+                "/v1beta/models/gemini-3-flash:countTokens",
+                ApiFormat::Passthrough,
+            ),
+            ("/v1beta/cachedContents", ApiFormat::Passthrough),
+            ("/v1beta/openai/chat/completions", ApiFormat::OpenAiChat),
+            ("/v1beta/openai/embeddings", ApiFormat::OpenAiEmbeddings),
+            ("/v1/chat/completions", ApiFormat::OpenAiChat),
+        ] {
+            assert_eq!(classify(Backend::Gemini, &post, path), expected, "{path}");
+        }
+        assert_eq!(
+            classify(
+                Backend::Gemini,
+                &Method::GET,
+                "/v1beta/models/gemini-3-flash:generateContent"
+            ),
+            ApiFormat::Passthrough
+        );
+        // The other backends do not speak Gemini's dialect.
+        assert_eq!(
+            classify(
+                Backend::LmStudio,
+                &post,
+                "/v1beta/models/gemini-3-flash:generateContent"
+            ),
+            ApiFormat::Passthrough
+        );
+        assert_eq!(
+            classify(Backend::Anthropic, &post, "/v1beta/openai/chat/completions"),
+            ApiFormat::Passthrough
+        );
+        assert_eq!(
+            classify(Backend::OpenAi, &post, "/v1/responses"),
+            ApiFormat::OpenAiResponses
         );
     }
 

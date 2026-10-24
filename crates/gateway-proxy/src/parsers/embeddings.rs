@@ -1,6 +1,7 @@
 //! Embedding responses: one JSON object, no text. OpenAI-compatible (`/v1/embeddings`, LM Studio
 //! `/api/v0/embeddings`) reports `usage.prompt_tokens`; Ollama's `/api/embed` reports `prompt_eval_count`
-//! and `total_duration` (older `/api/embeddings` reports neither, so the record keeps no counts).
+//! and `total_duration` (older `/api/embeddings` reports neither, so the record keeps no counts); Gemini's
+//! `:embedContent` reports nothing but the vector.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -12,6 +13,7 @@ use crate::rejection::in_stream_error;
 pub enum Flavor {
     OpenAi,
     Ollama,
+    Gemini,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -95,6 +97,9 @@ impl StreamParser for EmbeddingsParser {
                     .unwrap_or_else(|| wall.total_ms());
                 parsed.timings_estimated = body.total_duration.is_none();
             }
+            Flavor::Gemini => {
+                parsed = parsed.with_wall_timings(wall, false);
+            }
         }
         Some(parsed)
     }
@@ -155,5 +160,25 @@ mod tests {
         let error = br#"{"error":{"message":"model not loaded"}}"#;
         let parsed = parse_all(Box::new(EmbeddingsParser::new(Flavor::OpenAi)), error, 16).unwrap();
         assert_eq!(parsed.in_stream_error.as_deref(), Some("model not loaded"));
+    }
+
+    #[test]
+    fn gemini_embeddings_carry_no_counts() {
+        // The documented `:embedContent` answer: a vector and nothing else.
+        let gemini = br#"{"embedding":{"values":[0.013,-0.008,0.021]}}"#;
+        let parsed =
+            parse_all(Box::new(EmbeddingsParser::new(Flavor::Gemini)), gemini, 16).unwrap();
+        assert_eq!(parsed.prompt_tokens, None);
+        assert_eq!(parsed.gen_tokens, Some(0));
+        assert_eq!(parsed.stop_reason.as_deref(), Some("embeddings"));
+        assert_eq!(parsed.model, None);
+        assert!(parsed.timings_estimated);
+        let error =
+            br#"{"error":{"code":400,"message":"API key not valid.","status":"INVALID_ARGUMENT"}}"#;
+        let parsed = parse_all(Box::new(EmbeddingsParser::new(Flavor::Gemini)), error, 16).unwrap();
+        assert_eq!(
+            parsed.in_stream_error.as_deref(),
+            Some("API key not valid.")
+        );
     }
 }
