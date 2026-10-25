@@ -21,12 +21,30 @@ pub fn gemini_call(path: &str) -> Option<GeminiCall> {
         .strip_prefix("/v1beta/models/")
         .or_else(|| path.strip_prefix("/v1/models/"))?;
     let (model, method) = rest.rsplit_once(':')?;
-    (!model.is_empty() && !method.is_empty() && !model.contains('/') && !method.contains('/')).then(
-        || GeminiCall {
-            model: model.to_string(),
-            method: method.to_string(),
-        },
-    )
+    (!model.is_empty() && !model.contains('/') && is_gemini_method(method)).then(|| GeminiCall {
+        model: model.to_string(),
+        method: method.to_string(),
+    })
+}
+
+/// Gemini's RPC methods are camelCase verbs (`generateContent`, `countTokens`). Ollama's model tags use a
+/// colon too (`gemma4:12b-mlx`, `qwen3:latest`), so a tag with digits, hyphens or no capital is a tag.
+fn is_gemini_method(method: &str) -> bool {
+    const KNOWN: &[&str] = &[
+        "generateContent",
+        "streamGenerateContent",
+        "countTokens",
+        "embedContent",
+        "batchEmbedContents",
+        "predict",
+        "predictLongRunning",
+        "generateAnswer",
+    ];
+    KNOWN.contains(&method)
+        || (!method.is_empty()
+            && method.chars().all(|c| c.is_ascii_alphabetic())
+            && method.starts_with(|c: char| c.is_ascii_lowercase())
+            && method.chars().any(|c| c.is_ascii_uppercase()))
 }
 
 /// Gemini's OpenAI-compatible paths, spelled as the `/v1` family they are.
@@ -198,6 +216,21 @@ mod tests {
         );
         assert_eq!(gemini_call("/v1beta/models/:generateContent"), None);
         assert_eq!(gemini_call("/v1beta/models/a/b:generateContent"), None);
+        assert_eq!(
+            gemini_call("/v1/models/gemma4:12b-mlx"),
+            None,
+            "an Ollama tag is not a method"
+        );
+        assert_eq!(gemini_call("/v1/models/qwen3:latest"), None);
+        assert_eq!(gemini_call("/v1/models/qwen3:14b"), None);
+        assert_eq!(
+            gemini_call("/v1beta/models/gemini-3-flash:predict").map(|c| c.method),
+            Some("predict".into())
+        );
+        assert_eq!(
+            gemini_call("/v1beta/models/gemini-3-flash:someFutureMethod").map(|c| c.method),
+            Some("someFutureMethod".into())
+        );
         for (path, expected) in [
             (
                 "/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent",

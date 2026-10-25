@@ -194,6 +194,21 @@ pub fn run_checks(config: &Config, config_path: &Path, paths: &Paths, home: &Pat
             }
         }
     }
+    if config.unified.enabled {
+        for addr in &config.unified.listen {
+            if port_open(*addr) {
+                out.push(ok(format!(
+                    "unified listener {addr} is bound (a gateway is running)"
+                )));
+            } else {
+                out.push(ok(format!(
+                    "unified listener {addr} is free (no gateway running on it)"
+                )));
+            }
+        }
+    } else {
+        out.push(ok("unified listener: disabled".to_string()));
+    }
     let dash = config.dashboard.listen;
     if port_open(dash) {
         out.push(ok(format!(

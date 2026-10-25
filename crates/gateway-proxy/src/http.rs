@@ -199,6 +199,23 @@ pub fn redact_url(url: &str) -> String {
     }
 }
 
+/// The body with `model` replaced, for an alias or a `provider/model` spelling the unified listener
+/// resolved: the target must see the name it knows. Anything but a JSON object is returned unchanged; key
+/// order is not preserved on a rewrite.
+pub fn rewrite_model(body: Bytes, model: &str) -> Bytes {
+    let Ok(mut value) = serde_json::from_slice::<Value>(&body) else {
+        return body;
+    };
+    let Some(obj) = value.as_object_mut() else {
+        return body;
+    };
+    obj.insert("model".to_string(), Value::String(model.to_string()));
+    match serde_json::to_vec(&value) {
+        Ok(bytes) => Bytes::from(bytes),
+        Err(_) => body,
+    }
+}
+
 /// Headers as stored on a record: values of credentials replaced, everything else as sent.
 pub fn redact_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     headers
@@ -469,6 +486,27 @@ mod tests {
         );
         assert_eq!(ct, "text/plain; charset=utf-8");
         assert_eq!(body, Bytes::from("upstream unreachable\n"));
+    }
+
+    #[test]
+    fn rewrite_model_replaces_the_name_and_leaves_other_bodies_alone() {
+        let out = rewrite_model(
+            Bytes::from(r#"{"model":"fast","messages":[],"stream":true}"#),
+            "gemma4:12b-mlx",
+        );
+        let v = val(&out);
+        assert_eq!(v["model"], json!("gemma4:12b-mlx"));
+        assert_eq!(v["stream"], json!(true));
+        assert_eq!(
+            rewrite_model(Bytes::from("[1,2]"), "x"),
+            Bytes::from("[1,2]"),
+            "not an object"
+        );
+        assert_eq!(rewrite_model(Bytes::from("nope"), "x"), Bytes::from("nope"));
+        assert_eq!(
+            val(&rewrite_model(Bytes::from("{}"), "m"))["model"],
+            json!("m")
+        );
     }
 
     #[test]

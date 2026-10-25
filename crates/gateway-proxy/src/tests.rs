@@ -2,19 +2,23 @@
 //! reqwest as the client, and the event bus as the witness. Ported from Ollama-Monitor's `proxy.rs` tests
 //! and extended for the second backend, the tunnel, the DLP hook and the inspector's capture.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
+use axum::extract::Request;
 use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::routing::{any, get, post};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
+use gateway_core::config::UnifiedConfig;
 use gateway_core::events::{EventReceiver, GatewayEvent};
 use gateway_core::pricing::PricingTable;
+use gateway_core::routing::RoutingTable;
 use gateway_core::state::BackendsState;
 use gateway_core::types::{
     ApiFormat, Backend, BackendSnapshot, Direction, FailureSource, ModelInfo, ModelState, Outcome,
@@ -951,6 +955,520 @@ async fn mismatched_formats_and_credentials_are_refused_before_anything_leaves()
     );
     let _ = next_record(&mut ollama.events).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+/// A unified listener over `targets` (backend → mock URL), with the routing table given.
+fn start_unified(
+    targets: BTreeMap<Backend, String>,
+    routing: RoutingTable,
+    opts: Options,
+) -> TestProxy {
+    let listener = bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (events, rx) = gateway_core::events::channel();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let ctx = ProxyContext::new(
+        opts.store,
+        events,
+        opts.session_id,
+        Arc::new(PricingTable::baked()),
+        Arc::new(BackendsState::new()),
+        CapturePolicy {
+            max_body_bytes: 1024 * 1024,
+            max_buffered_request_bytes: 1024 * 1024,
+        },
+    )
+    .unwrap();
+    if let Some(scanner) = opts.scanner {
+        ctx.set_scanner(scanner);
+    }
+    ctx.set_routing(Arc::new(routing));
+    let flags = TargetFlags {
+        capture_bodies: opts.capture_bodies,
+        record_passthrough: opts.record_passthrough,
+        rewrite_include_usage: opts.rewrite_include_usage,
+    };
+    let targets = targets
+        .into_iter()
+        .map(|(backend, upstream)| {
+            (
+                backend,
+                BackendUpstream {
+                    backend,
+                    upstream,
+                    flags,
+                },
+            )
+        })
+        .collect();
+    let config = Arc::new(ListenerConfig {
+        listen: listener.local_addr().unwrap(),
+        mode: ListenerMode::Unified { targets },
+    });
+    tokio::spawn(serve(listener, config, ctx.clone(), shutdown_rx));
+    TestProxy {
+        url,
+        events: rx,
+        ctx,
+        _shutdown: shutdown_tx,
+    }
+}
+
+/// What a mock saw: method, path with query, and the body's `model` when it had one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Seen {
+    method: String,
+    path: String,
+    model: Option<String>,
+}
+
+type SeenLog = Arc<std::sync::Mutex<Vec<Seen>>>;
+
+/// A mock that answers every route with a small JSON body and records what it was asked.
+fn recording_mock(name: &'static str) -> (Router, SeenLog) {
+    let seen: SeenLog = Arc::default();
+    let seen2 = seen.clone();
+    let router = Router::new().fallback(any(move |req: Request| {
+        let seen = seen2.clone();
+        async move {
+            let (parts, body) = req.into_parts();
+            let bytes = axum::body::to_bytes(body, 1 << 20)
+                .await
+                .unwrap_or_default();
+            let model = serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|v| v.get("model")?.as_str().map(str::to_string));
+            seen.lock().unwrap().push(Seen {
+                method: parts.method.to_string(),
+                path: parts
+                    .uri
+                    .path_and_query()
+                    .map(|p| p.to_string())
+                    .unwrap_or_default(),
+                model,
+            });
+            (
+                [(header::CONTENT_TYPE, "application/json")],
+                format!(r#"{{"served_by":"{name}"}}"#),
+            )
+        }
+    }));
+    (router, seen)
+}
+
+fn last_seen(log: &SeenLog) -> Seen {
+    log.lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("the mock was called")
+}
+
+/// Ollama's model list with cloud models marked.
+fn ollama_snapshot(ids: &[(&str, bool)]) -> BackendSnapshot {
+    BackendSnapshot {
+        backend: Backend::Ollama,
+        reachable: true,
+        version: None,
+        error: None,
+        models: ids
+            .iter()
+            .map(|(id, cloud)| ModelInfo {
+                backend: Backend::Ollama,
+                id: id.to_string(),
+                kind: Some("llm".into()),
+                compatibility_type: None,
+                quantization: None,
+                max_context_length: None,
+                loaded_context_length: None,
+                state: if *cloud {
+                    ModelState::Cloud
+                } else {
+                    ModelState::NotLoaded
+                },
+                publisher: None,
+                arch: None,
+                capabilities: Vec::new(),
+                size_bytes: None,
+                size_vram_bytes: None,
+                expires_at: None,
+                remote_host: cloud.then(|| "ollama.com".to_string()),
+            })
+            .collect(),
+        polled_at: chrono::Utc::now(),
+    }
+}
+
+/// One listener, four mock providers: every way a request picks its target, in order.
+#[tokio::test]
+async fn the_unified_listener_routes_by_prefix_path_model_header_and_default() {
+    let (lms_router, lms_seen) = recording_mock("lmstudio");
+    let (ollama_router, ollama_seen) = recording_mock("ollama");
+    let (anthropic_router, anthropic_seen) = recording_mock("anthropic");
+    let (gemini_router, gemini_seen) = recording_mock("gemini");
+    let targets = BTreeMap::from([
+        (Backend::LmStudio, spawn_upstream(lms_router).await),
+        (Backend::Ollama, spawn_upstream(ollama_router).await),
+        (Backend::Anthropic, spawn_upstream(anthropic_router).await),
+        (Backend::Gemini, spawn_upstream(gemini_router).await),
+    ]);
+    let routing = RoutingTable::from_config(&UnifiedConfig {
+        aliases: BTreeMap::from([("fast".to_string(), "ollama/gemma4:12b-mlx".to_string())]),
+        ..UnifiedConfig::default()
+    });
+    let mut proxy = start_unified(targets, routing, Options::default());
+    proxy
+        .ctx
+        .backends
+        .set(snapshot_with_loaded_model("qwen/qwen3.6-27b", 4096))
+        .await;
+    proxy
+        .ctx
+        .backends
+        .set(ollama_snapshot(&[
+            ("gemma4:12b-mlx", false),
+            ("deepseek-v4-pro:cloud", true),
+        ]))
+        .await;
+    let client = reqwest::Client::new();
+    let post = |path: &str, body: &str| {
+        client
+            .post(format!("{}{path}", proxy.url))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
+    };
+
+    // The live model list.
+    let resp = post(
+        "/v1/chat/completions",
+        r#"{"model":"qwen/qwen3.6-27b","messages":[]}"#,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.text().await.unwrap(), r#"{"served_by":"lmstudio"}"#);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.backend, Backend::LmStudio);
+    assert_eq!(record.routed_by.as_deref(), Some("model_list"));
+    assert!(!record.is_cloud);
+    assert_eq!(last_seen(&lms_seen).path, "/v1/chat/completions");
+
+    // A built-in pattern, through Gemini's OpenAI-compatible surface.
+    let resp = post(
+        "/v1/chat/completions",
+        r#"{"model":"gemini-3-flash","messages":[]}"#,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.backend, Backend::Gemini);
+    assert_eq!(record.routed_by.as_deref(), Some("model_pattern"));
+    assert!(record.is_cloud);
+    assert_eq!(
+        record.path, "/v1/chat/completions",
+        "the client's path is what is recorded"
+    );
+    assert_eq!(
+        last_seen(&gemini_seen).path,
+        "/v1beta/openai/chat/completions"
+    );
+
+    // A built-in pattern in Anthropic's own format.
+    let resp = post(
+        "/v1/messages",
+        r#"{"model":"claude-opus-5-5","max_tokens":1,"messages":[]}"#,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.backend, Backend::Anthropic);
+    assert_eq!(record.routed_by.as_deref(), Some("model_pattern"));
+    assert_eq!(last_seen(&anthropic_seen).path, "/v1/messages");
+
+    // An explicit prefix beats the model.
+    let resp = post(
+        "/anthropic/v1/messages",
+        r#"{"model":"gemini-3-flash","max_tokens":1,"messages":[]}"#,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.backend, Backend::Anthropic);
+    assert_eq!(record.routed_by.as_deref(), Some("prefix"));
+    assert_eq!(record.path, "/anthropic/v1/messages");
+    assert_eq!(
+        last_seen(&anthropic_seen).path,
+        "/v1/messages",
+        "the prefix is stripped"
+    );
+
+    // Provider-specific path families.
+    let resp = client
+        .get(format!("{}/api/ps", proxy.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(
+        (record.backend, record.api_format),
+        (Backend::Ollama, ApiFormat::Passthrough)
+    );
+    assert_eq!(record.routed_by.as_deref(), Some("path"));
+    assert_eq!(last_seen(&ollama_seen).path, "/api/ps");
+    let resp = client
+        .get(format!("{}/v1beta/models", proxy.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.backend, Backend::Gemini);
+    assert!(record.is_cloud);
+    assert_eq!(last_seen(&gemini_seen).path, "/v1beta/models");
+
+    // A model-less request with a provider header.
+    let resp = client
+        .get(format!("{}/v1/models", proxy.url))
+        .header("anthropic-version", "2023-06-01")
+        .header("x-api-key", "sk-ant-test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.backend, Backend::Anthropic);
+    assert_eq!(record.routed_by.as_deref(), Some("header"));
+    assert_eq!(last_seen(&anthropic_seen).path, "/v1/models");
+
+    // The merged model list, answered by the gateway and not recorded.
+    let resp = client
+        .get(format!("{}/v1/models", proxy.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert!(resp.headers().contains_key("x-request-id"));
+    let list: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(list["object"], "list");
+    let ids: Vec<(String, String)> = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["id"].as_str().unwrap().to_string(),
+                m["owned_by"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert!(
+        ids.contains(&("qwen/qwen3.6-27b".to_string(), "lmstudio".to_string())),
+        "{ids:?}"
+    );
+    assert!(
+        ids.contains(&("gemma4:12b-mlx".to_string(), "ollama".to_string())),
+        "{ids:?}"
+    );
+    assert!(
+        ids.contains(&("fast".to_string(), "alias".to_string())),
+        "{ids:?}"
+    );
+    assert!(no_record_within(&mut proxy.events, Duration::from_millis(300)).await);
+
+    // An alias is rewritten for the target but recorded as the client spelled it.
+    let resp = post("/v1/chat/completions", r#"{"model":"fast","messages":[]}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.backend, Backend::Ollama);
+    assert_eq!(record.routed_by.as_deref(), Some("alias"));
+    assert_eq!(record.model_requested.as_deref(), Some("fast"));
+    assert_eq!(
+        last_seen(&ollama_seen).model.as_deref(),
+        Some("gemma4:12b-mlx")
+    );
+
+    // An Ollama cloud model is egress through Ollama.
+    let resp = post(
+        "/v1/chat/completions",
+        r#"{"model":"deepseek-v4-pro:cloud","messages":[]}"#,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.backend, Backend::Ollama);
+    assert!(record.is_cloud);
+
+    // Nothing decides: the default backend.
+    let resp = post(
+        "/v1/chat/completions",
+        r#"{"model":"llama-9","messages":[]}"#,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.backend, Backend::LmStudio);
+    assert_eq!(record.routed_by.as_deref(), Some("default"));
+
+    // A local target outside the inference formats: forwarded as passthrough, body and all.
+    let resp = post("/api/show", r#"{"name":"gemma4:12b-mlx"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(
+        (record.backend, record.api_format),
+        (Backend::Ollama, ApiFormat::Passthrough)
+    );
+    assert_eq!(last_seen(&ollama_seen).path, "/api/show");
+    let resp = post("/v1/files", r#"{"purpose":"fine-tune"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(
+        (record.backend, record.api_format),
+        (Backend::LmStudio, ApiFormat::Passthrough)
+    );
+    assert_eq!(record.routed_by.as_deref(), Some("default"));
+    assert_eq!(last_seen(&lms_seen).path, "/v1/files");
+
+    // A cloud POST outside the inference formats is scanned cloud passthrough once the model says where.
+    let resp = post(
+        "/v1/messages/count_tokens",
+        r#"{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}]}"#,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(
+        (record.backend, record.api_format),
+        (Backend::Anthropic, ApiFormat::CloudPassthrough)
+    );
+    assert!(record.is_cloud);
+    assert_eq!(last_seen(&anthropic_seen).path, "/v1/messages/count_tokens");
+
+    // `GET /v1/models/{id}` resolves the id like a model.
+    let resp = client
+        .get(format!("{}/v1/models/gemma4:12b-mlx", proxy.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.backend, Backend::Ollama);
+    assert_eq!(record.routed_by.as_deref(), Some("model_list"));
+    assert_eq!(last_seen(&ollama_seen).path, "/v1/models/gemma4:12b-mlx");
+
+    // Refusals: a format the provider lacks, another provider's header, a backend this listener lacks.
+    let resp = post(
+        "/v1/embeddings",
+        r#"{"model":"claude-opus-5-5","input":"x"}"#,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "format_not_served", "{body}");
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.backend, Backend::Anthropic);
+    assert_eq!(
+        record.outcome,
+        Outcome::Failed {
+            status: 400,
+            source: FailureSource::Gateway
+        }
+    );
+    let resp = post(
+        "/v1/chat/completions",
+        r#"{"model":"gemini-3-flash","messages":[]}"#,
+    )
+    .header("anthropic-version", "2023-06-01")
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "credential_mismatch", "{body}");
+    let _ = next_record(&mut proxy.events).await;
+    let resp = post(
+        "/openai/v1/chat/completions",
+        r#"{"model":"gpt-5","messages":[]}"#,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "backend_disabled", "{body}");
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.backend, Backend::OpenAi);
+    assert_eq!(record.routed_by.as_deref(), Some("prefix"));
+    assert_eq!(proxy.ctx.inflight_count(), 0);
+}
+
+#[tokio::test]
+async fn upgrades_to_cloud_providers_are_refused_on_the_unified_listener() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (anthropic_router, anthropic_seen) = recording_mock("anthropic");
+    let targets = BTreeMap::from([
+        (Backend::LmStudio, spawn_upstream(Router::new()).await),
+        (Backend::Anthropic, spawn_upstream(anthropic_router).await),
+    ]);
+    let mut proxy = start_unified(targets, RoutingTable::default(), Options::default());
+    let addr = proxy.url.trim_start_matches("http://").to_string();
+    let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    stream
+        .write_all(
+            b"GET /anthropic/v1/ws HTTP/1.1\r\nHost: gateway\r\nConnection: Upgrade, close\r\nUpgrade: websocket\r\n\
+              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut raw))
+        .await
+        .expect("the gateway answers and closes")
+        .unwrap();
+    let text = String::from_utf8_lossy(&raw);
+    assert!(text.starts_with("HTTP/1.1 400"), "{text}");
+    assert!(
+        text.contains("a tunnel cannot be scanned"),
+        "Anthropic's error shape carries the message, not a code: {text}"
+    );
+    assert!(text.contains(r#""type":"error""#), "{text}");
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.backend, Backend::Anthropic);
+    assert_eq!(
+        record.outcome,
+        Outcome::Failed {
+            status: 400,
+            source: FailureSource::Gateway
+        }
+    );
+    assert!(
+        anthropic_seen.lock().unwrap().is_empty(),
+        "nothing left the machine"
+    );
 }
 
 /// What the LM Studio poller publishes for a loaded model: enough for the context-length fallback.

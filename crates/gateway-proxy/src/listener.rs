@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::routing::any;
-use gateway_core::config::{BackendConfig, CaptureConfig};
+use gateway_core::config::{BackendConfig, BackendsConfig, CaptureConfig, UnifiedConfig};
 use gateway_core::events::EventSender;
 use gateway_core::pricing::PricingTable;
 use gateway_core::routing::RoutingTable;
@@ -64,6 +64,11 @@ impl BackendUpstream {
 pub enum ListenerMode {
     /// Every request goes to this one backend.
     Fixed(BackendUpstream),
+    /// The target is chosen per request from the enabled backends: an explicit prefix, a provider-specific
+    /// path, the model, a provider header, or the configured default (`crate::route`).
+    Unified {
+        targets: BTreeMap<Backend, BackendUpstream>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -87,22 +92,63 @@ impl ListenerConfig {
             .collect()
     }
 
-    /// The one backend a fixed listener serves.
+    /// One unified listener per configured address, over every enabled backend.
+    pub fn unified(cfg: &UnifiedConfig, backends: &BackendsConfig) -> Vec<ListenerConfig> {
+        if !cfg.enabled {
+            return Vec::new();
+        }
+        let targets: BTreeMap<Backend, BackendUpstream> = backends
+            .enabled()
+            .map(|(backend, b)| (backend, BackendUpstream::from_config(backend, b)))
+            .collect();
+        cfg.listen
+            .iter()
+            .map(|listen| ListenerConfig {
+                listen: *listen,
+                mode: ListenerMode::Unified {
+                    targets: targets.clone(),
+                },
+            })
+            .collect()
+    }
+
+    /// The one backend a fixed listener serves; `None` for the unified listener.
     pub fn fixed(&self) -> Option<&BackendUpstream> {
-        let ListenerMode::Fixed(target) = &self.mode;
-        Some(target)
+        match &self.mode {
+            ListenerMode::Fixed(target) => Some(target),
+            ListenerMode::Unified { .. } => None,
+        }
+    }
+
+    /// The target for `backend` on this listener, if it can reach it.
+    pub fn target(&self, backend: Backend) -> Option<&BackendUpstream> {
+        match &self.mode {
+            ListenerMode::Fixed(target) => (target.backend == backend).then_some(target),
+            ListenerMode::Unified { targets } => targets.get(&backend),
+        }
     }
 
     /// Every backend this listener can send a request to.
     pub fn backends(&self) -> Vec<Backend> {
-        let ListenerMode::Fixed(target) = &self.mode;
-        vec![target.backend]
+        match &self.mode {
+            ListenerMode::Fixed(target) => vec![target.backend],
+            ListenerMode::Unified { targets } => targets.keys().copied().collect(),
+        }
     }
 
     /// A line for the startup log.
     pub fn summary(&self) -> String {
-        let ListenerMode::Fixed(target) = &self.mode;
-        format!("{} → {}", target.backend, target.upstream)
+        match &self.mode {
+            ListenerMode::Fixed(target) => format!("{} → {}", target.backend, target.upstream),
+            ListenerMode::Unified { targets } => format!(
+                "unified → {}",
+                targets
+                    .keys()
+                    .map(|b| b.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
     }
 }
 
@@ -334,6 +380,43 @@ mod tests {
         assert_eq!(listeners[1].summary(), "ollama → http://127.0.0.1:11400");
         cfg.enabled = false;
         assert!(ListenerConfig::from_backend(Backend::Ollama, &cfg).is_empty());
+    }
+
+    #[test]
+    fn the_unified_listener_covers_every_enabled_backend() {
+        let config = gateway_core::config::Config::parse(
+            "[backends.openai]\nenabled = false\n[unified]\nlisten = [\"127.0.0.1:4000\", \"127.0.0.1:4001\"]\n",
+        )
+        .unwrap();
+        let listeners = ListenerConfig::unified(&config.unified, &config.backends);
+        assert_eq!(listeners.len(), 2);
+        assert!(listeners[0].fixed().is_none());
+        assert_eq!(
+            listeners[0].backends(),
+            vec![
+                Backend::LmStudio,
+                Backend::Ollama,
+                Backend::Anthropic,
+                Backend::Gemini
+            ]
+        );
+        assert_eq!(
+            listeners[0]
+                .target(Backend::Gemini)
+                .map(|t| t.upstream.as_str()),
+            Some("https://generativelanguage.googleapis.com")
+        );
+        assert!(
+            listeners[0].target(Backend::OpenAi).is_none(),
+            "disabled backends are not targets"
+        );
+        assert_eq!(listeners[1].listen.port(), 4001);
+        assert_eq!(
+            listeners[1].summary(),
+            "unified → lmstudio, ollama, anthropic, gemini"
+        );
+        let config = gateway_core::config::Config::parse("[unified]\nenabled = false\n").unwrap();
+        assert!(ListenerConfig::unified(&config.unified, &config.backends).is_empty());
     }
 
     #[test]

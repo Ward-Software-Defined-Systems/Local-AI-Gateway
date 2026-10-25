@@ -24,10 +24,10 @@ runtime:
 |---|---|
 | dashboard server | axum-server over HTTP or TLS: token gate, embedded SPA, REST, `/ws` |
 | signal task | SIGINT/SIGTERM stop; SIGHUP reloads `config.toml` and the known-secrets file through `Hot` |
-| proxy listeners | one axum server per configured address, forwarding to one backend (`gateway-proxy`) |
+| proxy listeners | one axum server per configured address: a fixed listener forwards to one backend, the unified listener picks the backend per request (`gateway-proxy`) |
 | store writer | the only writing SQLite connection; batches commands into transactions (`gateway-core::store`) |
 | retention | deletes bodies, passthrough rows and raw hardware samples past their windows, every 10 minutes; reads the policy from `Hot` each run |
-| backend pollers | LM Studio and Ollama model lists and reachability, every 2 s (`gateway-backends`) |
+| backend pollers | LM Studio and Ollama model lists and reachability, every 2 s (`gateway-backends`); the cloud providers are not polled because the gateway holds no keys |
 | hardware sampler | sysinfo plus ioreg or nvidia-smi, every 2 s (`gateway-hardware`) |
 | metrics loop | rolling windows from completed requests, republished every 2 s, one log line per feed row |
 | alert dispatcher | turns findings, blocks and backend outages into alerts; stores, publishes and delivers them |
@@ -37,11 +37,12 @@ Shutdown gives open connections five seconds, under launchd's ten and systemd's 
 ### Hot reload
 
 `crates/local-ai-gateway/src/hot.rs` holds what changes without a restart: the current `Config`, the DLP
-`Engine`, the pricing table, the retention policy and the alert settings. `Hot::apply` validates a whole
-configuration (structure, pricing, DLP compile, known-secrets file), swaps the engine into the proxy's
-scanner slot, the capture policy and pricing into the proxy context, the alert settings and the retention
-policy, then publishes `config_changed` with the sections that differ from the boot configuration and only
-take effect on restart (`dashboard`, `backends.<name>`, `hardware`, `log`). CLI overrides (`--dashboard-listen`,
+`Engine`, the pricing table, the retention policy, the alert settings and the unified listener's routing
+table (default backend, aliases, routes). `Hot::apply` validates a whole configuration (structure, pricing,
+DLP compile, known-secrets file), swaps the engine into the proxy's scanner slot, the capture policy,
+pricing and routing table into the proxy context, the alert settings and the retention policy, then
+publishes `config_changed` with the sections that differ from the boot configuration and only take effect
+on restart (`dashboard`, `backends.<name>`, `unified.listen`, `hardware`, `log`). CLI overrides (`--dashboard-listen`,
 `--log-level`) are re-applied to every reload so a reload of the unchanged file is a no-op. `PUT /api/config`
 writes the file atomically (write, rename) and applies; `POST /api/config/reload` and SIGHUP re-read it.
 Errors leave everything as it was.
@@ -50,8 +51,8 @@ Errors leave everything as it was.
 
 | Crate | Role |
 |---|---|
-| `gateway-core` | shared types, `config.toml` schema and validation, paths, event bus, aggregation, pricing, store |
-| `gateway-proxy` | listeners, classifier, request/response pipelines, parsers, upgrade tunnel, capture, the `RequestScanner` hook |
+| `gateway-core` | shared types, `config.toml` schema and validation, paths, event bus, aggregation, pricing, the routing table (`routing`), store |
+| `gateway-proxy` | listeners (fixed and unified), classifier (`router`), resolver (`route`), request/response pipelines, parsers, upgrade tunnel, capture, the `RequestScanner` hook |
 | `gateway-dlp` | rules, known-secret matcher, engine (JSON walk, raw scan, allowlist, fingerprints, previews), redaction, policy |
 | `gateway-backends` | LM Studio and Ollama clients and pollers |
 | `gateway-hardware` | sysinfo, ioreg, nvidia-smi, powermetrics |
@@ -61,6 +62,51 @@ Errors leave everything as it was.
 `frontend/dist` into `OUT_DIR/ui` (or a placeholder page when the frontend is not built) and rust-embed
 compiles it in; it emits `rerun-if-changed` for every file under `dist/` so a frontend-only rebuild
 re-embeds.
+
+## Routing
+
+A listener has a mode. `Fixed` sends everything to one backend, as the per-backend listeners always did.
+`Unified` (`[unified]`, port 4000 by default) holds every enabled backend as a target and chooses per
+request. The choice is made as early as the request allows:
+
+1. From the path alone (`RequestMeta::new`): an explicit prefix (`/anthropic/v1/messages` → Anthropic,
+   stripped before forwarding) or a provider-specific family (`/api/v0/*` → LM Studio, other `/api/*` →
+   Ollama, `/v1beta/*` and `/v1/models/{model}:{method}` → Gemini). Anything else is provisionally the
+   default backend and `decided = false`.
+2. For an undecided request with a body (`inference`): the body is read first and the model decides, in
+   this order: a configured alias (its target replaces `model` in the forwarded body), the live LM Studio
+   and Ollama model lists (exact id, then Ollama's canonical spelling; this comes before the `provider/`
+   reading because LM Studio ids are `publisher/model`), a `provider/model` spelling using one of the five
+   backend ids (the prefix is stripped from `model`), the configured `[[unified.routes]]` prefixes (longest
+   wins), the built-in patterns (`claude-*` Anthropic; `gemini-*` Gemini; `gpt-*`, `chatgpt-*`, `o1`/`o3`/`o4`,
+   `text-embedding-3*` OpenAI; an Ollama `:cloud` tag Ollama), then a provider header, then the default.
+3. For an undecided request without a body: a provider header (`anthropic-version` or `x-api-key` →
+   Anthropic, `x-goog-api-key` → Gemini, `openai-organization`/`openai-project`/`openai-beta` → OpenAI);
+   `GET /v1/models` with none of them is answered by the gateway with the merged list of the local servers'
+   models and the aliases (`owned_by` names the backend); `GET /v1/models/{id}` resolves `{id}` like a model;
+   anything else goes to the default.
+
+Every record carries `routed_by` (`listener`, `prefix`, `path`, `alias`, `model_list`, `provider_prefix`,
+`route`, `model_pattern`, `header`, `default`). The pure functions live in `gateway-proxy/src/route.rs`
+(prefixes, families, hints, the live-list lookup, the `compatible` matrix, Gemini's compat path, the
+credential guard, the merged list) and `gateway-core/src/routing.rs` (the configured table, which
+`Config::validate` checks with the same code and `Hot` reloads live).
+
+Once the target is a cloud provider: a format it does not serve is refused with 400 `format_not_served`
+(Anthropic takes Messages and OpenAI chat; Gemini its own formats plus OpenAI chat and embeddings, which
+are sent to `/v1beta/openai/…`; OpenAI the OpenAI family); a request carrying another provider's header
+(`x-goog-api-key` to Anthropic, `anthropic-version` to Gemini, …) is refused with 400 `credential_mismatch`
+so a key never reaches the wrong host; any request with a body outside the inference formats becomes
+`cloud_passthrough` (buffered, scanned, forwarded, both bodies stored redacted, kept past the passthrough
+retention, not a feed row); `accept-encoding` is removed so the answer can be parsed; a WebSocket upgrade is
+refused with 400 because the tunnel cannot scan what it copies; and the request goes out through the second
+HTTP client, which refuses to follow redirects (reqwest would carry `x-api-key` and `x-goog-api-key` to the
+new host), so a 3xx is passed to the client and recorded as a failure. A completed request to a provider gets
+`actual_cost_usd` from `pricing.toml` by the model id (`PricingTable::price_for_model`: lower-case, `.`→`-`,
+longest key at a `-`/`:`/`@`/end boundary) and no hypothetical columns. Local targets accept every format
+and header, as before. A backend the listener does not reach (disabled) is refused with 503
+`backend_disabled`. Gateway errors to a provider's clients outside the inference formats take that
+provider's own error shape.
 
 ## DLP engine
 
@@ -119,10 +165,17 @@ configuration, engine and pricing through `Hot`, so a reload is visible to the n
 
 ## Invariants
 
-- The proxy never changes the bytes a client receives. The only request change is the OpenAI
-  `stream_options.include_usage` rewrite on streaming `/v1` requests.
+- The proxy never changes the bytes a client receives. The request changes it makes are enumerated: the
+  OpenAI `stream_options.include_usage` rewrite on streaming requests (every listener); and on the unified
+  listener only, the explicit `/anthropic/`-style prefix stripped from the path, `model` rewritten when an
+  alias or a `provider/model` spelling resolved it, `/v1/…` → `/v1beta/openai/…` for OpenAI-format requests
+  to Gemini, and `accept-encoding` removed from requests to cloud providers.
+- The gateway holds no provider keys. A client's credentials go only to the backend its request resolved
+  to; a request whose headers belong to another provider is refused; a cloud provider's redirect is never
+  followed.
 - No request or response body, header value or access token is ever written to the log. Bodies reach
-  only the SQLite capture store, DLP-redacted.
+  only the SQLite capture store, DLP-redacted. `x-goog-api-key` joins the redacted headers; credential
+  query parameters are redacted in the stored query and in logged URLs.
 - A finding never carries the matched value: fingerprint and masked preview only. Nothing typed into the
   test box is stored or logged.
 - Unknown `config.toml` keys are errors. Validation errors stop startup and refuse a reload; warnings are logged.
@@ -150,6 +203,13 @@ with the "tokens to keep from the initial prompt" wording and no numbers: 400 on
 as `rejected`, records the status the client received, and takes the context length from the latest model
 list when the message has none.
 
+There are no captures from the cloud providers yet. The Gemini parser (`parsers/gemini.rs`: SSE frames
+with `alt=sse`, one object, or a JSON array parsed when complete; cumulative `usageMetadata`, the last
+chunk wins; `thoughtsTokenCount` counted as output and thought parts kept as reply text) and the providers'
+OpenAI-compatible paths are tested against the documented shapes; the Anthropic and OpenAI formats are
+covered by the LM Studio and Ollama captures. The first captures from Anthropic and Gemini will settle
+whether their compat endpoints accept `stream_options` (`rewrite_include_usage` is off for Gemini until then).
+
 ## Known gaps
 
 - A rejected record from LM Studio 0.4.25 has no `input_tokens`, and its `context_length` is a lookup in the
@@ -168,3 +228,14 @@ list when the message has none.
   OpenAI, Anthropic, Responses and Ollama chunk shapes, so a format the parser does not know shows raw only.
 - `service` and `setup` have been exercised on macOS; the Linux arms are unit-tested (unit text, paths) but
   not yet run on the Ubuntu box.
+- No format translation: a request reaches a cloud provider in a format it serves or is refused. A
+  model-less request with a body and no provider header goes to `default_backend`.
+- The cloud providers are not polled, so they show no reachability, version or model list; the merged
+  `GET /v1/models` answer is gateway-generated and not recorded (`RequestRecord.backend` is not optional).
+- A Gemini stream without `alt=sse` is parsed once the array is complete, so its figures arrive at the end.
+- WebSocket upgrades to cloud providers are refused on every listener (Gemini Live, OpenAI Realtime).
+- Real spend is flat list price: cache discounts and tiers are not applied, Ollama `:cloud` has no price.
+- Schema v2 rows name the cloud providers; an older build fails whole page queries on them (`rows.rs`
+  parses `backend` strictly), so the database file must not be shared with or downgraded to one.
+- The reqwest root store is webpki; a corporate TLS interceptor in front of the providers would need
+  `rustls-tls-native-roots`. Cloud uploads above the 64 MiB request cap get 413.

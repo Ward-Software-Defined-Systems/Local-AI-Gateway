@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::{Body, HttpBody};
 use axum::extract::{ConnectInfo, Request, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::Response;
 use bytes::Bytes;
@@ -33,7 +34,7 @@ use uuid::Uuid;
 use crate::capture::{BodyCapture, Timeline};
 use crate::error::ProxyError;
 use crate::http;
-use crate::listener::{ListenerMode, ProxyState, TargetFlags};
+use crate::listener::{BackendUpstream, ListenerMode, ProxyState, TargetFlags};
 use crate::parsers::{self, StreamParser, WallClock};
 use crate::rejection;
 use crate::route;
@@ -57,6 +58,9 @@ pub struct RequestMeta {
     pub upstream: String,
     pub flags: TargetFlags,
     pub routed_by: RoutedBy,
+    /// Whether `backend` is final. A fixed listener decides at once; the unified listener may need the
+    /// body (the model) or the headers first.
+    pub decided: bool,
     pub listener: String,
     pub client_ip: String,
     pub user_agent: Option<String>,
@@ -90,22 +94,52 @@ impl RequestMeta {
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string)
         };
-        let ListenerMode::Fixed(target) = &st.listener.mode;
         let path = req.uri().path().to_string();
         let query = req.uri().query().map(str::to_string);
+        // A fixed listener's choice is final. The unified listener settles what the path alone decides (an
+        // explicit prefix, a provider-specific family) and otherwise starts from the default backend until
+        // the body or the headers have been seen.
+        let (backend, forward_path, routed_by, decided) = match &st.listener.mode {
+            ListenerMode::Fixed(target) => (target.backend, path.clone(), RoutedBy::Listener, true),
+            ListenerMode::Unified { .. } => match route::strip_provider_prefix(&path) {
+                Some((backend, rest)) => (backend, rest, RoutedBy::Prefix, true),
+                None => match route::path_family(&path) {
+                    Some(backend) => (backend, path.clone(), RoutedBy::Path, true),
+                    None => (
+                        st.ctx.routing().default_backend,
+                        path.clone(),
+                        RoutedBy::Default,
+                        false,
+                    ),
+                },
+            },
+        };
+        // A backend this listener cannot reach leaves placeholders; `handle` refuses the request.
+        let (upstream, flags) = match st.listener.target(backend) {
+            Some(target) => (target.upstream.clone(), target.flags),
+            None => (
+                String::new(),
+                TargetFlags {
+                    capture_bodies: true,
+                    record_passthrough: true,
+                    rewrite_include_usage: false,
+                },
+            ),
+        };
         Self {
             id: Uuid::now_v7(),
-            backend: target.backend,
-            upstream: target.upstream.clone(),
-            flags: target.flags,
-            routed_by: RoutedBy::Listener,
+            backend,
+            upstream,
+            flags,
+            routed_by,
+            decided,
             listener: st.listener.listen.to_string(),
             client_ip: addr.ip().to_string(),
             user_agent: header_str("user-agent"),
             client_request_id: header_str("x-request-id"),
             method: req.method().to_string(),
-            api_format: router::classify(target.backend, req.method(), &path),
-            forward_path: path.clone(),
+            api_format: router::classify(backend, req.method(), &forward_path),
+            forward_path,
             path,
             stored_query: query.as_deref().map(http::redact_query),
             query,
@@ -117,9 +151,20 @@ impl RequestMeta {
             model_requested: None,
             // A cloud provider's traffic leaves the machine whatever the model; Ollama's `:cloud` models are
             // recognised once the body names one.
-            is_cloud: target.backend.is_cloud_provider(),
+            is_cloud: decided && backend.is_cloud_provider(),
             streamed: false,
         }
+    }
+
+    /// The unified listener's final choice: the target's upstream and flags, and whether the prompt
+    /// leaves the machine.
+    fn settle(&mut self, target: &BackendUpstream, routed_by: RoutedBy) {
+        self.backend = target.backend;
+        self.upstream = target.upstream.clone();
+        self.flags = target.flags;
+        self.routed_by = routed_by;
+        self.decided = true;
+        self.is_cloud = target.backend.is_cloud_provider();
     }
 
     /// The path and raw query sent upstream.
@@ -157,8 +202,45 @@ pub async fn handle(
     req: Request,
 ) -> Response {
     let mut meta = RequestMeta::new(&st, addr, &req);
-    debug!(request = %meta.id, backend = %meta.backend, method = %meta.method, path = %meta.path, format = %meta.api_format, "request received");
+    debug!(request = %meta.id, backend = %meta.backend, method = %meta.method, path = %meta.path, format = %meta.api_format, decided = meta.decided, "request received");
+    if meta.decided && st.listener.target(meta.backend).is_none() {
+        let err = ProxyError::BackendDisabled {
+            backend: meta.backend,
+        };
+        return fail_gateway(&st, meta, err, None, Vec::new()).await;
+    }
+    let has_body = !req.body().is_end_stream();
+    if !meta.decided && !has_body {
+        // Nothing but the path and the headers to go on.
+        match model_less_target(&st, &meta, req.headers()).await {
+            ModelLess::Backend(backend, routed_by) => {
+                if let Err(err) = settle(&st, &mut meta, backend, routed_by) {
+                    return fail_gateway(&st, meta, err, None, Vec::new()).await;
+                }
+            }
+            ModelLess::ModelPath(backend, routed_by, forward_path) => {
+                if let Err(err) = settle(&st, &mut meta, backend, routed_by) {
+                    return fail_gateway(&st, meta, err, None, Vec::new()).await;
+                }
+                meta.forward_path = forward_path;
+            }
+            ModelLess::MergedModels => return merged_models_response(&st, &meta).await,
+        }
+    }
     if router::is_upgrade(req.headers()) {
+        let provisional = meta.backend;
+        if !meta.decided
+            && let Err(err) = settle(&st, &mut meta, provisional, RoutedBy::Default)
+        {
+            return fail_gateway(&st, meta, err, None, Vec::new()).await;
+        }
+        if meta.backend.is_cloud_provider() {
+            // The tunnel copies bytes without scanning them, which is the one thing cloud egress may not do.
+            let err = ProxyError::UpgradeToCloud {
+                backend: meta.backend,
+            };
+            return fail_gateway(&st, meta, err, None, Vec::new()).await;
+        }
         st.ctx.inflight_insert(meta.inflight(RequestKind::Upgrade));
         publish(
             &st.ctx.events,
@@ -168,7 +250,7 @@ pub async fn handle(
         );
         return crate::tunnel::handle(st, meta, req).await;
     }
-    if meta.backend.is_cloud_provider() {
+    if meta.decided && meta.backend.is_cloud_provider() {
         if let Some(header) = route::credential_conflict(req.headers(), meta.backend) {
             warn!(request = %meta.id, header, backend = %meta.backend, "request carries another provider's credential; refused");
             let err = ProxyError::CredentialMismatch {
@@ -178,15 +260,84 @@ pub async fn handle(
             return fail_gateway(&st, meta, err, None, Vec::new()).await;
         }
         // Any body bound for a cloud provider leaves the machine, whatever the path: scan and keep it.
-        if !meta.api_format.is_inference() && !req.body().is_end_stream() {
+        if !meta.api_format.is_inference() && has_body {
             meta.api_format = ApiFormat::CloudPassthrough;
         }
     }
-    if meta.api_format.is_inference() || meta.api_format == ApiFormat::CloudPassthrough {
+    // An undecided request with a body is read first: the model decides where it goes.
+    if meta.api_format.is_inference()
+        || meta.api_format == ApiFormat::CloudPassthrough
+        || (!meta.decided && has_body)
+    {
         inference(st, meta, req).await
     } else {
         passthrough(st, meta, req).await
     }
+}
+
+/// Settles the unified listener's choice, or refuses a backend this listener cannot reach.
+fn settle(
+    st: &ProxyState,
+    meta: &mut RequestMeta,
+    backend: Backend,
+    routed_by: RoutedBy,
+) -> Result<(), ProxyError> {
+    match st.listener.target(backend) {
+        Some(target) => {
+            meta.settle(target, routed_by);
+            Ok(())
+        }
+        None => Err(ProxyError::BackendDisabled { backend }),
+    }
+}
+
+/// Where a request without a body goes on the unified listener.
+enum ModelLess {
+    Backend(Backend, RoutedBy),
+    /// `GET /v1/models/{id}`: the id resolved like a model, and the path to forward (an alias or a
+    /// `provider/` spelling rewritten).
+    ModelPath(Backend, RoutedBy, String),
+    /// `GET /v1/models` with nothing naming a provider: the gateway answers with the merged list.
+    MergedModels,
+}
+
+async fn model_less_target(st: &ProxyState, meta: &RequestMeta, headers: &HeaderMap) -> ModelLess {
+    if let Some(backend) = route::header_hint(headers) {
+        return ModelLess::Backend(backend, RoutedBy::Header);
+    }
+    let routing = st.ctx.routing();
+    if meta.method == Method::GET.as_str() {
+        if meta.forward_path.trim_end_matches('/') == "/v1/models" {
+            return ModelLess::MergedModels;
+        }
+        if let Some(id) = meta.forward_path.strip_prefix("/v1/models/")
+            && !id.is_empty()
+        {
+            let local = route::LocalModels::fetch(&st.ctx.backends).await;
+            if let Some(resolved) = route::resolve_model(&routing, &local, id) {
+                let forward_path = match resolved.rewrite {
+                    Some(model) => format!("/v1/models/{model}"),
+                    None => meta.forward_path.clone(),
+                };
+                return ModelLess::ModelPath(resolved.backend, resolved.routed_by, forward_path);
+            }
+        }
+    }
+    ModelLess::Backend(routing.default_backend, RoutedBy::Default)
+}
+
+/// The unified listener's own answer to `GET /v1/models`: every model the local servers list plus the
+/// aliases. Gateway-generated, so it is not recorded.
+async fn merged_models_response(st: &ProxyState, meta: &RequestMeta) -> Response {
+    let local = route::LocalModels::fetch(&st.ctx.backends).await;
+    let list = route::merged_models_json(&local, &st.ctx.routing());
+    debug!(request = %meta.id, "answered the merged model list");
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-request-id", meta.id.to_string())
+        .body(Body::from(list.to_string()))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -194,13 +345,6 @@ pub async fn handle(
 // ---------------------------------------------------------------------------------------------------------
 
 async fn passthrough(st: ProxyState, meta: RequestMeta, req: Request) -> Response {
-    st.ctx.inflight_insert(meta.inflight(RequestKind::Http));
-    publish(
-        &st.ctx.events,
-        GatewayEvent::RequestStarted {
-            request: meta.inflight(RequestKind::Http),
-        },
-    );
     let (parts, body) = req.into_parts();
     let streamed = !body.is_end_stream();
     let upstream_body = if streamed {
@@ -208,9 +352,27 @@ async fn passthrough(st: ProxyState, meta: RequestMeta, req: Request) -> Respons
     } else {
         reqwest::Body::from(Bytes::new())
     };
-    let url = meta.upstream_url();
     // A streamed body is forwarded unchanged, so its declared length still holds.
-    let mut headers = http::forwardable(&parts.headers, !streamed);
+    passthrough_send(st, meta, parts, upstream_body, !streamed).await
+}
+
+/// Forwards a request unread (or one already buffered) and records it as metadata when the response ends.
+async fn passthrough_send(
+    st: ProxyState,
+    meta: RequestMeta,
+    parts: Parts,
+    upstream_body: reqwest::Body,
+    strip_length: bool,
+) -> Response {
+    st.ctx.inflight_insert(meta.inflight(RequestKind::Http));
+    publish(
+        &st.ctx.events,
+        GatewayEvent::RequestStarted {
+            request: meta.inflight(RequestKind::Http),
+        },
+    );
+    let url = meta.upstream_url();
+    let mut headers = http::forwardable(&parts.headers, strip_length);
     headers.insert("x-request-id", request_id_value(meta.id));
     let upstream = match st
         .ctx
@@ -347,7 +509,7 @@ impl Drop for Tracked {
 async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Response {
     let policy = st.ctx.capture();
     let (parts, body) = req.into_parts();
-    let body = match http::read_capped(body, policy.max_buffered_request_bytes).await {
+    let mut body = match http::read_capped(body, policy.max_buffered_request_bytes).await {
         Ok(body) => body,
         Err(err) => {
             warn!(request = %meta.id, error = %err, "request body refused");
@@ -359,7 +521,49 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
     let fields = http::request_fields_for(meta.api_format, &meta.forward_path, &body);
     meta.model_requested = fields.model.clone();
     meta.streamed = fields.streamed;
+    let mut ollama_cloud = false;
+    if !meta.decided {
+        // The unified listener's body stage: the model (alias, live lists, `provider/` spelling, routes,
+        // patterns), else a provider header, else the default backend.
+        let routing = st.ctx.routing();
+        let local = route::LocalModels::fetch(&st.ctx.backends).await;
+        let resolved = fields
+            .model
+            .as_deref()
+            .and_then(|model| route::resolve_model(&routing, &local, model));
+        let (backend, rewrite, routed_by, cloud) = match resolved {
+            Some(r) => (r.backend, r.rewrite, r.routed_by, r.ollama_cloud),
+            None => match route::header_hint(&parts.headers) {
+                Some(backend) => (backend, None, RoutedBy::Header, false),
+                None => (routing.default_backend, None, RoutedBy::Default, false),
+            },
+        };
+        ollama_cloud = cloud;
+        if let Err(err) = settle(&st, &mut meta, backend, routed_by) {
+            st.ctx.inflight_insert(meta.inflight(RequestKind::Http));
+            return fail_gateway(&st, meta, err, None, Vec::new()).await;
+        }
+        if let Some(model) = rewrite {
+            body = http::rewrite_model(body, &model);
+        }
+        meta.forward_path = route::forward_path(meta.api_format, backend, &meta.forward_path);
+        if backend.is_cloud_provider() {
+            if let Some(header) = route::credential_conflict(&parts.headers, backend) {
+                warn!(request = %meta.id, header, backend = %backend, "request carries another provider's credential; refused");
+                st.ctx.inflight_insert(meta.inflight(RequestKind::Http));
+                let err = ProxyError::CredentialMismatch { header, backend };
+                return fail_gateway(&st, meta, err, None, Vec::new()).await;
+            }
+            if !meta.api_format.is_inference() {
+                meta.api_format = ApiFormat::CloudPassthrough;
+            }
+        } else if !meta.api_format.is_inference() {
+            // A local target outside the inference formats: the buffered body goes through as passthrough.
+            return passthrough_send(st, meta, parts, reqwest::Body::from(body), true).await;
+        }
+    }
     meta.is_cloud = meta.backend.is_cloud_provider()
+        || ollama_cloud
         || match (&meta.model_requested, meta.backend) {
             (Some(model), Backend::Ollama) => {
                 gateway_backends::ollama::is_cloud_name(model)

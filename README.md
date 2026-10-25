@@ -1,6 +1,6 @@
 # WSDS Local AI Gateway
 
-A monitoring, inspection and data-loss-prevention reverse proxy for local LLM servers, with a web dashboard. It sits in front of **LM Studio** and **Ollama**, records every request's tokens, time to first token and throughput, prices them at frontier-API list rates, keeps a searchable copy of each request for debugging, scans prompts and replies for secrets and personal data, alerts you, and shows hardware telemetry, all from one binary.
+A monitoring, inspection and data-loss-prevention reverse proxy for local LLM servers, with a web dashboard. It sits in front of **LM Studio** and **Ollama**, records every request's tokens, time to first token and throughput, prices them at frontier-API list rates, keeps a searchable copy of each request for debugging, scans prompts and replies for secrets and personal data, alerts you, and shows hardware telemetry, all from one binary. A unified listener routes by model name to those two servers or to **Anthropic**, **Gemini** and **OpenAI**, so the same scanning, recording and cost tracking covers the traffic that really leaves the machine.
 
 It replaces the two terminal monitors it grew out of, [LMS-Monitor](https://github.com/Ward-Software-Defined-Systems/LMS-Monitor) and [Ollama-Monitor](https://github.com/Ward-Software-Defined-Systems/Ollama-Monitor).
 
@@ -8,11 +8,13 @@ It replaces the two terminal monitors it grew out of, [LMS-Monitor](https://gith
 
 ## Features
 
-- **Reverse proxy for both backends.** One listener per backend, byte-transparent: clients see exactly what LM Studio or Ollama sent. Streams are teed, never buffered. WebSocket clients (the LM Studio SDK) are tunnelled.
-- **Every API format parsed.** OpenAI chat, completions, embeddings and Responses; Anthropic Messages; Ollama native chat, generate and embeddings; LM Studio native `/api/v0`. Tokens, time to first token, tokens per second and stop reasons per request; estimates are marked `~` when an engine gave no counts.
-- **Overview, LM Studio and Ollama tabs**: the live feed, loaded and cloud models, hardware (CPU, memory, GPU, and ANE power on macOS or VRAM on Linux), rolling 1m/5m/15m/session windows, hypothetical frontier cost, charts.
-- **Requests inspector**: keyset-paginated history with filters and full-text search over bodies, each request with its request and response bodies, reassembled reply text, headers, chunk timeline, findings, copy-as-curl and download.
-- **DLP**: 38 built-in rules (cloud keys, tokens, private keys, JWTs, database URLs, payment cards, IBANs, social security numbers, emails, phones) plus your own regexes and exact known secrets. Findings carry a fingerprint and a masked preview, never the value. Stored copies are redacted. Requests to Ollama cloud models carrying a secret are **blocked** before they leave the machine.
+- **Reverse proxy for both local backends.** One listener per backend, byte-transparent: clients see exactly what LM Studio or Ollama sent. Streams are teed, never buffered. WebSocket clients (the LM Studio SDK) are tunnelled.
+- **One unified listener for everything.** A single port that picks the backend per request: an explicit prefix (`/anthropic/…`, `/openai/…`, `/gemini/…`, `/lmstudio/…`, `/ollama/…`), a provider-specific path (`/api/v0/*`, `/api/*`, `/v1beta/*`), the model (your aliases, the live LM Studio and Ollama model lists, a `provider/model` spelling, your prefix routes, then `claude-*`, `gemini-*` and `gpt-*`), a provider header, or the configured default. Standard paths stay standard, so a client only changes its base URL. Nothing is translated: each provider is reached in a format it speaks, and a mismatch is a clear 400.
+- **Cloud providers as backends.** Anthropic, Gemini and OpenAI are reached over HTTPS with the client's own key, which the gateway forwards to the provider the request resolved to and never stores. Every request to them is cloud egress: scanned under the cloud policy, recorded with its bodies, and priced at the provider's list price as real spend. A header that belongs to another provider's API is refused before anything is sent.
+- **Every API format parsed.** OpenAI chat, completions, embeddings and Responses; Anthropic Messages; Gemini `generateContent`, `streamGenerateContent` and `embedContent`; Ollama native chat, generate and embeddings; LM Studio native `/api/v0`. Tokens, time to first token, tokens per second and stop reasons per request; estimates are marked `~` when an engine gave no counts.
+- **Overview, LM Studio, Ollama and Cloud tabs**: the live feed, loaded and cloud models, hardware (CPU, memory, GPU, and ANE power on macOS or VRAM on Linux), rolling 1m/5m/15m/session windows, hypothetical frontier cost for local traffic and real spend per provider for cloud traffic, charts.
+- **Requests inspector**: keyset-paginated history with filters and full-text search over bodies, each request with its request and response bodies, reassembled reply text, headers, chunk timeline, findings, how it was routed, copy-as-curl and download.
+- **DLP**: 38 built-in rules (cloud keys, tokens, private keys, JWTs, database URLs, payment cards, IBANs, social security numbers, emails, phones) plus your own regexes and exact known secrets. Findings carry a fingerprint and a masked preview, never the value. Stored copies are redacted. Requests to Ollama cloud models or to Anthropic, Gemini and OpenAI carrying a secret are **blocked** before they leave the machine.
 - **Alerts**: in-app alert centre, desktop notifications (macOS and Linux desktops) and a webhook, throttled per rule so one noisy client cannot flood you. Backend outages and recoveries alert too.
 - **Hot reload**: DLP rules, policy, alerts, capture limits and prices change without a restart, from the Settings tab or with SIGHUP.
 - **Runs as a service**: a launchd agent on macOS, a systemd user unit on Linux, installed with one command.
@@ -57,17 +59,33 @@ The backends keep their own ports; the gateway listens on its own (defaults `127
 
 The `lms` CLI talks to LM Studio's internal port and is unaffected.
 
+### The unified listener
+
+`[unified]` listens on `127.0.0.1:4000` by default and serves every enabled backend, the three cloud providers included. Point a client's base URL at it and keep the standard paths; the model decides where the request goes. An agent application that speaks the standard Anthropic, Gemini and OpenAI-compatible endpoints needs nothing but its base URLs changed:
+
+| Client | Setting |
+|---|---|
+| Anthropic-format clients | `ANTHROPIC_BASE_URL=http://<host>:4000` (`claude-*` models go to Anthropic, local model ids to the server that lists them) |
+| Gemini-format clients | base URL `http://<host>:4000/v1beta` (the `/v1beta/*` paths always go to Gemini) |
+| OpenAI-compatible SDKs and tools | `OPENAI_BASE_URL=http://<host>:4000/v1` (`gpt-*` to OpenAI; `claude-*` and `gemini-*` through those providers' OpenAI-compatible endpoints; local ids to LM Studio or Ollama) |
+| Ollama CLI and native clients | `OLLAMA_HOST=<host>:4000` (`/api/*` always goes to Ollama) |
+| Forcing a target | prefix the path: `http://<host>:4000/anthropic/v1/messages`, `/openai/v1/…`, `/gemini/v1beta/…`, `/lmstudio/api/v0/…`, `/ollama/api/…` |
+| Aliases | `[unified.aliases] fast = "ollama/gemma4:12b-mlx"`; the client asks for `fast`, the gateway rewrites the model for Ollama |
+
+Clients send their own provider keys, as they do today; the gateway forwards a key only to the provider the request resolved to. `GET /v1/models` on the unified port answers with the local servers' models and your aliases merged into one OpenAI-style list, unless a provider header (`anthropic-version`, `x-goog-api-key`, `openai-organization`) names a provider, in which case that provider's list is fetched. Requests that no rule decides go to `default_backend` (LM Studio); the prefix is the escape hatch. WebSocket upgrades are tunnelled to local backends only, since a tunnel cannot be scanned.
+
 ## The dashboard
 
 | Tab | What it shows |
 |---|---|
-| Overview | both backends: feed, models, hardware, rolling metrics, cost, charts |
-| LM Studio, Ollama | the same, for one backend |
-| Requests | the history with filters and search; a request's bodies, headers, timeline and findings |
-| Security | findings and alerts of the last 24 hours, the alert centre, every rule with its effective policy, a test box, the cloud-egress counter |
-| Settings | runtime facts and paths, the `config.toml` editor (check, save and apply, reload), maintenance |
+| Overview | every backend: feed, models, hardware, rolling metrics, cost, charts |
+| LM Studio, Ollama | the same, for one local backend |
+| Cloud | Anthropic, Gemini and OpenAI together: feed, rolling metrics, spend per provider at list price and a cumulative spend chart |
+| Requests | the history with filters and search; a request's bodies, headers, timeline, findings and how it was routed |
+| Security | findings and alerts of the last 24 hours, the alert centre, every rule with its effective policy per backend, a test box, the cloud-egress counter |
+| Settings | runtime facts and paths (every listener and what it reaches), the `config.toml` editor (check, save and apply, reload), maintenance |
 
-The status bar shows backend reachability and versions, the live-socket state, unacknowledged alerts, cloud requests in the last 24 hours and the lifetime totals. The feed can be paused (`PAUSED`) and the session metrics reset, as in the terminal monitors.
+The status bar shows backend reachability and versions, the live-socket state, unacknowledged alerts, cloud requests and spend in the last 24 hours and the lifetime totals. The feed can be paused (`PAUSED`) and the session metrics reset, as in the terminal monitors.
 
 ![The LM Studio tab: the feed, rolling metrics, hardware line and model list of one backend, with the time-range charts below](assets/lm-studio.png)
 
@@ -86,7 +104,8 @@ The status bar shows backend reachability and versions, the live-socket state, u
 | Section | Keys | Reload |
 |---|---|---|
 | `[dashboard]` | `listen`, `auth`, `tls` (`auto`, `on`, `off`), `token_file` | restart |
-| `[backends.lmstudio]`, `[backends.ollama]` | `enabled`, `listen` (list), `upstream`, `capture_bodies`, `record_passthrough`, `rewrite_include_usage`, `poll_interval_secs`; LM Studio: `lms_bin`, `app_path` | restart |
+| `[backends.lmstudio]`, `[backends.ollama]`, `[backends.anthropic]`, `[backends.gemini]`, `[backends.openai]` | `enabled`, `listen` (list; empty for a backend reached through the unified listener only, the cloud providers' default), `upstream` (`https://` off loopback for a cloud provider), `capture_bodies`, `record_passthrough`, `rewrite_include_usage`, `poll_interval_secs` (local only); LM Studio: `lms_bin`, `app_path` | restart |
+| `[unified]` | `enabled`, `listen` (list), `default_backend`, `aliases` (name → `provider/model` or model), `[[unified.routes]]` (`model_prefix`, `backend`) | `listen` and `enabled` restart; the rest live |
 | `[capture]` | `max_body_bytes`, `retention_days`, `passthrough_retention_hours`, `hardware_raw_retention_hours`, `max_buffered_request_bytes` | live |
 | `[dlp]`, `[dlp.cloud]`, `[dlp.rules.<id>]`, `[dlp.backends.<name>]`, `[[dlp.custom_rules]]`, `[[dlp.allowlist]]` | see below | live |
 | `[alerts]`, `[alerts.desktop_notification]`, `[alerts.webhook]` | `throttle_secs`; `enabled`, `min_severity`; `url`, `headers` or `headers_file`, `timeout_secs` | live |
@@ -96,13 +115,13 @@ The status bar shows backend reachability and versions, the live-socket state, u
 
 "Live" sections apply when you save in the Settings tab, call `POST /api/config/reload`, or send `SIGHUP`. The Settings tab shows which sections still need a restart.
 
-`rewrite_include_usage` adds `stream_options.include_usage` to streaming chat and completion requests (`/v1/chat/completions`, `/v1/completions` and LM Studio's `/api/v0/chat/completions`). LM Studio sends no token counts on a stream without it; Ollama sends them either way. It is the only change the gateway makes to a request.
+`rewrite_include_usage` adds `stream_options.include_usage` to streaming chat and completion requests (`/v1/chat/completions`, `/v1/completions` and LM Studio's `/api/v0/chat/completions`). LM Studio sends no token counts on a stream without it; Ollama sends them either way; it is off for Gemini until a capture shows its OpenAI-compatible endpoint accepts it. On the per-backend listeners it is the only change the gateway makes to a request. The unified listener also strips an explicit `/anthropic/`-style prefix from the path, rewrites `model` when an alias or a `provider/model` spelling resolved it, sends OpenAI-format requests for Gemini to `/v1beta/openai/…`, and removes `accept-encoding` from requests to cloud providers so their answers arrive uncompressed and can be parsed. Everything else is forwarded byte for byte.
 
 ## DLP
 
 Every inference request body is scanned before it is forwarded: JSON bodies leaf by leaf (a finding says `$.messages[3].content`), anything else as text. The reply text is scanned when the response ends. A finding records the rule, severity, location, a 32-character fingerprint and a masked preview (`AKIA…MPLE`); the plaintext is never stored, logged or shown. Stored copies replace each value with `[REDACTED:<rule>:<fingerprint>]`, so a redacted JSON body stays valid JSON.
 
-**Actions.** A request-side finding is `record` (kept in the Security tab), `alert` (also notified) or `block` (refused with 403 and a `x-gateway-blocked: dlp` header; the backend never sees it). Replies can be `record` or `alert`. The order of precedence is the rule's own default, `[dlp] default_action`, `[dlp.backends.<name>]`, `[dlp.rules.<id>]`, then the cloud override: a request routed to an Ollama cloud model takes the stricter of its action and `[dlp.cloud] request_action` (`block` by default; `pii_action` for personal data). Secret rules default to the global action; PII rules record (email, phone) or alert (payment card, IBAN, social security number).
+**Actions.** A request-side finding is `record` (kept in the Security tab), `alert` (also notified) or `block` (refused with 403 and a `x-gateway-blocked: dlp` header; the backend never sees it). Replies can be `record` or `alert`. The order of precedence is the rule's own default, `[dlp] default_action`, `[dlp.backends.<name>]`, `[dlp.rules.<id>]`, then the cloud override: a request routed to an Ollama cloud model or to Anthropic, Gemini or OpenAI takes the stricter of its action and `[dlp.cloud] request_action` (`block` by default; `pii_action` for personal data). Secret rules default to the global action; PII rules record (email, phone) or alert (payment card, IBAN, social security number). On a cloud provider every request with a body is scanned, not only the inference formats: Gemini's cached-content creation, Anthropic's token counting and uploads carry prompts too, and they are recorded with their bodies as `cloud_passthrough`.
 
 **Rules.** The 38 built-in rules cover AWS, GitHub, GitLab, Slack, Stripe, Google, GCP service accounts, Anthropic, OpenAI, Hugging Face, npm, PyPI, Twilio, SendGrid, Mailgun, Azure storage, DigitalOcean and Telegram credentials, PEM and OpenSSH private keys, age keys, JWTs, generic `password =` style assignments with high entropy, database and basic-auth URLs with embedded passwords, bearer tokens, and the PII rules. Each has a positive and a negative test vector. Add your own with `[[dlp.custom_rules]]` (regex crate syntax, optional capture group, keywords and entropy gate); disable, re-severity or re-action a rule with `[dlp.rules.<id>]`; exempt values with `[[dlp.allowlist]]` by rule, regex, fingerprint, direction or backend. Local dummy keys such as `sk-lm-studio` or `ollama` are allowlisted out of the box.
 
@@ -131,8 +150,8 @@ Every dashboard endpoint is under `/api`, JSON, gated by the token cookie (or `?
 | `GET /api/status` | version, platform, session, listeners, backends, database, DLP summary, paths |
 | `GET /api/models?backend=` | the unified model list |
 | `GET /api/hardware/current`, `GET /api/hardware/series?from&to` | telemetry |
-| `GET /api/metrics/rolling`, `/series?metric=`, `/cost`, `/lifetime` | metrics |
-| `GET /api/requests?cursor&limit&backend&model&outcome&format&client&cloud&has_findings&from&to&q&include_passthrough` | history (`q` is full-text search) |
+| `GET /api/metrics/rolling`, `/series?metric=`, `/cost`, `/spend?from&to`, `/lifetime` | metrics; `backend=` or `group=local\|cloud` scopes them; `spend` is what each cloud provider charged at list price |
+| `GET /api/requests?cursor&limit&backend&group&model&outcome&format&client&cloud&has_findings&from&to&q&include_passthrough` | history (`q` is full-text search) |
 | `GET /api/requests/inflight`, `GET /api/requests/{id}`, `GET /api/requests/{id}/body/{request\|response}`, `DELETE /api/requests/{id}/bodies` | one request |
 | `GET /api/findings?rule&severity&backend&direction&from&to&before&limit` | findings |
 | `GET /api/alerts?unacked&before&limit`, `POST /api/alerts/{id}/ack`, `POST /api/alerts/ack-all` | alerts |
@@ -158,8 +177,8 @@ Request metadata and findings are kept indefinitely; bodies expire after `retent
 
 | Path | Role |
 |---|---|
-| `crates/gateway-core` | types, configuration, paths, event bus, rolling aggregation, pricing, the SQLite store |
-| `crates/gateway-proxy` | listeners, route classifier, request and response pipelines, stream parsers, WebSocket tunnel |
+| `crates/gateway-core` | types, configuration, paths, event bus, rolling aggregation, pricing, the routing table, the SQLite store |
+| `crates/gateway-proxy` | listeners (fixed and unified), route classifier and resolver, request and response pipelines, stream parsers, WebSocket tunnel |
 | `crates/gateway-dlp` | rules, known secrets, scanning, redaction, policy |
 | `crates/gateway-backends` | LM Studio and Ollama clients and pollers |
 | `crates/gateway-hardware` | sysinfo, ioreg, nvidia-smi, powermetrics |
@@ -173,7 +192,8 @@ Request metadata and findings are kept indefinitely; bodies expire after `retent
 
 - The dashboard binds to loopback by default and requires the access token; `auth = false` is only accepted on loopback. Off loopback, `tls = "auto"` serves HTTPS with a self-signed certificate.
 - Proxy listeners carry no authentication, like the backends behind them. Bind them to loopback unless other machines need them, and consider setting LM Studio's network interface to `127.0.0.1` so nothing bypasses the gateway.
-- No request or response body, header value or access token is ever written to the log. Bodies reach only the database, DLP-redacted; `authorization`, `x-api-key`, `cookie` and `proxy-authorization` header values are redacted in stored copies.
+- Provider keys are the clients' own. The gateway holds none, forwards a key only to the provider the request resolved to, refuses a request whose headers belong to another provider's API, and never follows a redirect from a cloud provider (the client gets the 3xx instead). A cloud provider's `upstream` must be `https://` unless it is on loopback.
+- No request or response body, header value or access token is ever written to the log. Bodies reach only the database, DLP-redacted; `authorization`, `x-api-key`, `x-goog-api-key`, `cookie` and `proxy-authorization` header values are redacted in stored copies, and credential query parameters (`key`, `api_key`, `token`, …) are redacted in the stored query and in logged URLs.
 - The database is not encrypted. It holds prompts; treat the data directory accordingly.
 - Blocking happens on the request side only. A secret in a model's reply is recorded and alerted, never cut from the stream.
 
@@ -194,10 +214,17 @@ Request metadata and findings are kept indefinitely; bodies expire after `retent
 - Open streams that outlive the five-second shutdown grace are cut without a record.
 - Reply text is scanned once at the end of the response, not incrementally.
 - Changing a backend's `capture_bodies`, `record_passthrough` or `rewrite_include_usage` needs a restart.
+- The Gemini parser and the providers' OpenAI-compatible paths are tested against the documented shapes; real captures from Anthropic and Gemini are still to be taken, and `rewrite_include_usage` stays off for Gemini until they settle whether its compat endpoint accepts `stream_options`. There is no OpenAI capture at all.
+- A Gemini stream requested without `alt=sse` is a JSON array; it is parsed once it is complete, so its figures arrive at the end.
+- The cloud providers are not polled: no reachability, version or model list for them in the dashboard, and the merged `GET /v1/models` answer lists only the local servers' models and your aliases. That answer is gateway-generated and not recorded.
+- A model-less request with a body and no provider header goes to `default_backend`; use a prefix to force the target.
+- Real spend uses flat list prices: cache discounts and long-context tiers are not applied, so it is an upper bound (a lower one for Claude Haiku 5.5 and Gemini 3.1 Pro past their prompt-size thresholds). Ollama `:cloud` models have no price.
+- WebSocket APIs of the cloud providers (Gemini Live, OpenAI Realtime) are refused on every listener.
+- The database is schema v2 since the cloud providers arrived; an older gateway build cannot read rows that name them.
 
 ## Roadmap
 
-A unified `/v1` endpoint with model routing and aliases · per-client API keys and policy · import of the monitors' `usage.db` histories · model management (load, unload, pull, keep-alive countdown) · Prometheus `/metrics` · bypass detection via `lms log stream` · stopping a reply stream on a finding · encrypted database · Intel and AMD GPU telemetry on Linux.
+Format translation between provider APIs · per-client API keys and policy, and gateway-held provider keys · import of the monitors' `usage.db` histories · model management (load, unload, pull, keep-alive countdown) · Prometheus `/metrics` · bypass detection via `lms log stream` · stopping a reply stream on a finding · encrypted database · Intel and AMD GPU telemetry on Linux.
 
 ## Licence
 

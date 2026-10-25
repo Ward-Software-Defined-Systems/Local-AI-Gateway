@@ -212,6 +212,10 @@ fn run() -> Result<()> {
             proxy_listeners.push((listener, socket));
         }
     }
+    for listener in ListenerConfig::unified(&config.unified, &config.backends) {
+        let socket = gateway_proxy::bind(listener.listen)?;
+        proxy_listeners.push((listener, socket));
+    }
     let (token, source) = web::token::load_or_create(&token_path)?;
     match source {
         TokenSource::Minted => {

@@ -31,6 +31,14 @@ pub enum ProxyError {
         header: &'static str,
         backend: Backend,
     },
+    /// The unified listener resolved a request to a backend that is disabled, or that this listener does
+    /// not reach.
+    #[error("{} is not enabled on this gateway", backend.display_name())]
+    BackendDisabled { backend: Backend },
+    /// A WebSocket (or other) upgrade to a cloud provider: the tunnel copies bytes without scanning them,
+    /// so cloud egress through it is refused.
+    #[error("upgrades to {} are not supported: a tunnel cannot be scanned", backend.display_name())]
+    UpgradeToCloud { backend: Backend },
 }
 
 impl ProxyError {
@@ -40,7 +48,9 @@ impl ProxyError {
             ProxyError::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             ProxyError::BodyUnreadable
             | ProxyError::FormatMismatch { .. }
-            | ProxyError::CredentialMismatch { .. } => StatusCode::BAD_REQUEST,
+            | ProxyError::CredentialMismatch { .. }
+            | ProxyError::UpgradeToCloud { .. } => StatusCode::BAD_REQUEST,
+            ProxyError::BackendDisabled { .. } => StatusCode::SERVICE_UNAVAILABLE,
             ProxyError::ResponseBuild => StatusCode::INTERNAL_SERVER_ERROR,
             ProxyError::UnsupportedMethod => StatusCode::METHOD_NOT_ALLOWED,
             ProxyError::Blocked { .. } => StatusCode::FORBIDDEN,
@@ -58,6 +68,8 @@ impl ProxyError {
             ProxyError::Blocked { .. } => "dlp_blocked",
             ProxyError::FormatMismatch { .. } => "format_not_served",
             ProxyError::CredentialMismatch { .. } => "credential_mismatch",
+            ProxyError::BackendDisabled { .. } => "backend_disabled",
+            ProxyError::UpgradeToCloud { .. } => "upgrade_to_cloud_unsupported",
         }
     }
 }
