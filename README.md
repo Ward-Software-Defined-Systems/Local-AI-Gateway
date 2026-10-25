@@ -111,6 +111,33 @@ The `lms` CLI talks to LM Studio's internal port and is unaffected.
 
 Clients send their own provider keys, as they do today; the gateway forwards a key only to the provider the request resolved to. `GET /v1/models` on the unified port answers with the local servers' models and your aliases merged into one OpenAI-style list, unless a provider header (`anthropic-version`, `x-goog-api-key`, `openai-organization`) names a provider, in which case that provider's list is fetched. Requests that no rule decides go to `default_backend` (LM Studio); the prefix is the escape hatch. WebSocket upgrades are tunnelled to local backends only, since a tunnel cannot be scanned. Every response from a proxy listener, the per-backend ones included, carries `x-local-ai-gateway: <version>`, so a client can check that it is talking to the gateway before it routes provider traffic through it; an agent application can do that with one `GET /v1/models` against the unified port.
 
+### HTTPS on the listeners
+
+The proxy listeners speak plain HTTP by default, which is fine on loopback. Clients on other machines send bearer tokens and provider keys with every request, so give a listener HTTPS by setting `tls = "on"` (or `"auto"`, which is on for non-loopback addresses) in its section:
+
+```toml
+[unified]
+listen = ["0.0.0.0:4000"]
+tls = "on"
+
+[tls]
+sans = ["gateway.lan", "192.168.1.10"]      # the names and addresses clients use, besides localhost and the host name
+```
+
+The gateway runs its own certificate authority. The first start mints `tls/ca.pem` and `tls/ca-key.pem` in the data directory; every start then issues a fresh server certificate (`tls/cert.pem`, `tls/key.pem`) under it for `localhost`, the loopback addresses, the machine's host name, the specific addresses of the TLS listeners and the names in `[tls] sans`, valid 820 days. The dashboard's certificate comes from the same CA. Trust the CA once per machine or application and every listener, present and future, is covered:
+
+```sh
+local-ai-gateway tls ca-cert > local-ai-gateway-ca.pem     # or download it from the Settings tab
+local-ai-gateway tls show                                  # fingerprint, certificate names, https listeners
+# macOS, for every application that uses the system trust store (the login keychain asks for your password):
+security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db local-ai-gateway-ca.pem
+# Ubuntu, system wide:
+sudo cp local-ai-gateway-ca.pem /usr/local/share/ca-certificates/local-ai-gateway.crt && sudo update-ca-certificates
+# Per application instead: Node NODE_EXTRA_CA_CERTS=<file>, Python REQUESTS_CA_BUNDLE=<file> or SSL_CERT_FILE=<file>, curl --cacert <file>
+```
+
+Then use `https://` (and `wss://` for the LM Studio SDK) in the client settings above. Compare the fingerprint `tls show` prints with the one your trust store shows before you trust it. The CA key is as sensitive as the access token: whoever holds it can impersonate the gateway to every client that trusts the CA.
+
 ## The dashboard
 
 | Tab | What it shows |
@@ -141,8 +168,9 @@ The status bar shows backend reachability and versions, the live-socket state, u
 | Section | Keys | Reload |
 |---|---|---|
 | `[dashboard]` | `listen`, `auth`, `tls` (`auto`, `on`, `off`), `token_file` | restart |
-| `[backends.lmstudio]`, `[backends.ollama]`, `[backends.anthropic]`, `[backends.gemini]`, `[backends.openai]` | `enabled`, `listen` (list; empty for a backend reached through the unified listener only, the cloud providers' default), `upstream` (`https://` off loopback for a cloud provider), `capture_bodies`, `record_passthrough`, `rewrite_include_usage`, `poll_interval_secs` (local only); LM Studio: `lms_bin`, `app_path` | restart |
-| `[unified]` | `enabled`, `listen` (list), `default_backend`, `aliases` (name → `provider/model` or model), `[[unified.routes]]` (`model_prefix`, `backend`) | `listen` and `enabled` restart; the rest live |
+| `[backends.lmstudio]`, `[backends.ollama]`, `[backends.anthropic]`, `[backends.gemini]`, `[backends.openai]` | `enabled`, `listen` (list; empty for a backend reached through the unified listener only, the cloud providers' default), `upstream` (`https://` off loopback for a cloud provider), `capture_bodies`, `record_passthrough`, `rewrite_include_usage`, `tls` (`off`, `on`, `auto`; HTTPS on this backend's listeners), `poll_interval_secs` (local only); LM Studio: `lms_bin`, `app_path` | restart |
+| `[unified]` | `enabled`, `listen` (list), `tls` (`off`, `on`, `auto`), `default_backend`, `aliases` (name → `provider/model` or model), `[[unified.routes]]` (`model_prefix`, `backend`) | `listen`, `enabled` and `tls` restart; the rest live |
+| `[tls]` | `sans` (DNS names or IP addresses added to the server certificate) | restart |
 | `[capture]` | `max_body_bytes`, `retention_days`, `passthrough_retention_hours`, `hardware_raw_retention_hours`, `max_buffered_request_bytes` | live |
 | `[dlp]`, `[dlp.cloud]`, `[dlp.rules.<id>]`, `[dlp.backends.<name>]`, `[[dlp.custom_rules]]`, `[[dlp.allowlist]]` | see below | live |
 | `[alerts]`, `[alerts.desktop_notification]`, `[alerts.webhook]` | `throttle_secs`; `enabled`, `min_severity`; `url`, `headers` or `headers_file`, `timeout_secs` | live |
@@ -195,6 +223,7 @@ Every dashboard endpoint is under `/api`, JSON, gated by the token cookie (or `?
 | `GET /api/dlp/rules`, `POST /api/dlp/test {text, backend, is_cloud}`, `POST /api/dlp/reload` | DLP |
 | `GET /api/config`, `GET /api/config/file`, `POST /api/config/validate {text}`, `PUT /api/config {text}`, `POST /api/config/reload` | configuration |
 | `POST /api/session/reset`, `POST /api/retention/run`, `GET /api/sessions` | housekeeping |
+| `GET /api/tls/ca` | the CA certificate as a PEM download |
 | `GET /ws` | the event stream: `hello`, then every event (`request_started`, `request_completed`, `finding`, `alert`, `backend_snapshot`, `hardware`, `metrics`, `config_changed`, `shutdown`) |
 
 ## Files
@@ -204,7 +233,8 @@ Every dashboard endpoint is under `/api`, JSON, gated by the token cookie (or `?
 | `config.toml` | configuration (optional) |
 | `gateway.db` (+ `-wal`, `-shm`) | SQLite: requests, bodies (full-text indexed), findings, alerts, hardware samples, rollups |
 | `dashboard.token` | the access token, mode 0600 |
-| `tls/cert.pem`, `tls/key.pem` | the self-signed certificate when TLS is on |
+| `tls/ca.pem`, `tls/ca-key.pem` | the gateway's certificate authority: import `ca.pem` into clients; the key is mode 0600 and never leaves the machine |
+| `tls/cert.pem`, `tls/key.pem` | the server certificate every HTTPS listener serves, reissued at every start |
 | `known-secrets.toml` | exact values to watch for, mode 0600 |
 | `logs/local-ai-gateway.YYYY-MM-DD.log` | the daily log; `logs/service.*.log` under launchd |
 
@@ -227,7 +257,8 @@ Request metadata and findings are kept indefinitely; bodies expire after `retent
 
 ## Security notes
 
-- The dashboard binds to loopback by default and requires the access token; `auth = false` is only accepted on loopback. Off loopback, `tls = "auto"` serves HTTPS with a self-signed certificate.
+- The dashboard binds to loopback by default and requires the access token; `auth = false` is only accepted on loopback. Off loopback, `tls = "auto"` serves HTTPS with a certificate from the gateway's own CA.
+- Proxy listeners can serve HTTPS too (`tls` under `[backends.<name>]` and `[unified]`), with a certificate from the same CA; plain HTTP off loopback draws a warning at startup and in `setup check`. Trust the CA, never one certificate: the server certificate changes at every start. The CA key, `tls/ca-key.pem`, is as sensitive as the access token.
 - Proxy listeners carry no authentication, like the backends behind them. Bind them to loopback unless other machines need them, and consider setting LM Studio's network interface to `127.0.0.1` so nothing bypasses the gateway.
 - Every response from a proxy listener carries `x-local-ai-gateway: <version>`, the gateway's own value whatever an upstream sent, so a client can verify it is talking to the gateway before routing provider traffic through it.
 - Provider keys are the clients' own. The gateway holds none, forwards a key only to the provider the request resolved to, refuses a request whose headers belong to another provider's API, and never follows a redirect from a cloud provider (the client gets the 3xx instead). A cloud provider's `upstream` must be `https://` unless it is on loopback.
@@ -260,6 +291,8 @@ Request metadata and findings are kept indefinitely; bodies expire after `retent
 - Real spend uses flat list prices: cache discounts and long-context tiers are not applied, so it is an upper bound (a lower one for Claude Haiku 5.5 and Gemini 3.1 Pro past their prompt-size thresholds). Ollama `:cloud` models have no price.
 - WebSocket APIs of the cloud providers (Gemini Live, OpenAI Realtime) are refused on every listener.
 - The database is schema v2 since the cloud providers arrived; an older gateway build cannot read rows that name them.
+- The server certificate is issued at start and valid 820 days; a gateway that runs longer than that without a restart serves an expired certificate until it is restarted. Changing `tls` or `[tls] sans` needs a restart for the same reason.
+- A build from before the CA replaces the dashboard's old self-signed certificate on its first start. A browser that trusted that one certificate asks again; trust the CA instead.
 
 ## Roadmap
 

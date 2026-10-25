@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
-use gateway_core::config::{Config, IssueLevel};
+use gateway_core::config::{Config, IssueLevel, TlsMode};
 use gateway_core::paths::Paths;
 use gateway_core::types::Platform;
 
@@ -83,6 +83,14 @@ fn tool_in_path(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn scheme_for(tls: TlsMode, addr: SocketAddr) -> &'static str {
+    if tls.enabled_for(addr) {
+        "https"
+    } else {
+        "http"
+    }
+}
+
 /// Whether something answers on `addr` right now.
 fn port_open(addr: SocketAddr) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
@@ -148,7 +156,26 @@ pub fn run_checks(config: &Config, config_path: &Path, paths: &Paths, home: &Pat
         "token file",
         &paths.in_data_dir(&config.dashboard.token_file),
     ));
-    out.push(private_file("tls key", &paths.tls_dir().join("key.pem")));
+    out.push(private_file(
+        "tls key",
+        &paths.tls_dir().join(gateway_core::tls::KEY_FILE),
+    ));
+    out.push(private_file(
+        "tls CA key",
+        &paths.tls_dir().join(gateway_core::tls::CA_KEY_FILE),
+    ));
+    let ca_path = paths.tls_dir().join(gateway_core::tls::CA_CERT_FILE);
+    out.push(if ca_path.is_file() {
+        ok(format!(
+            "tls: CA {} (`tls ca-cert` prints it; clients of an https listener must trust it)",
+            ca_path.display()
+        ))
+    } else {
+        ok(format!(
+            "tls: CA not created yet ({} is written on first start)",
+            ca_path.display()
+        ))
+    });
     out.push(private_file(
         "known secrets",
         &paths.in_data_dir(&config.dlp.known_secrets_file),
@@ -183,26 +210,28 @@ pub fn run_checks(config: &Config, config_path: &Path, paths: &Paths, home: &Pat
             ))),
         }
         for addr in &cfg.listen {
+            let scheme = scheme_for(cfg.tls, *addr);
             if port_open(*addr) {
                 out.push(ok(format!(
-                    "{name}: listener {addr} is bound (a gateway is running)"
+                    "{name}: listener {addr} ({scheme}) is bound (a gateway is running)"
                 )));
             } else {
                 out.push(ok(format!(
-                    "{name}: listener {addr} is free (no gateway running on it)"
+                    "{name}: listener {addr} ({scheme}) is free (no gateway running on it)"
                 )));
             }
         }
     }
     if config.unified.enabled {
         for addr in &config.unified.listen {
+            let scheme = scheme_for(config.unified.tls, *addr);
             if port_open(*addr) {
                 out.push(ok(format!(
-                    "unified listener {addr} is bound (a gateway is running)"
+                    "unified listener {addr} ({scheme}) is bound (a gateway is running)"
                 )));
             } else {
                 out.push(ok(format!(
-                    "unified listener {addr} is free (no gateway running on it)"
+                    "unified listener {addr} ({scheme}) is free (no gateway running on it)"
                 )));
             }
         }

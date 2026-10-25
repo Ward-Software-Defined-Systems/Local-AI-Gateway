@@ -110,6 +110,31 @@ fn xdg_dir(var: Option<&OsStr>, home: &Path, default_parts: &[&str]) -> PathBuf 
     }
 }
 
+/// Writes a file readable by its owner only (mode 0600 on Unix), replacing any existing content. For
+/// the access token and private keys.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    std::io::Write::write_all(&mut file, bytes)
+        .with_context(|| format!("write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        // An existing file keeps its old mode on open; tighten it too.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod {}", path.display()))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

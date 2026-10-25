@@ -1,4 +1,5 @@
-//! One axum server per configured listen address. A fixed listener sends every request to one backend.
+//! One axum server per configured listen address, over plain HTTP or, with the certificate the gateway's CA
+//! issued, HTTPS. A fixed listener sends every request to one backend.
 //! `bind` claims the socket before the runtime exists so a taken port stops startup; `serve` runs the
 //! pipeline as a catch-all handler with graceful shutdown, and stamps every response it sends with
 //! `x-local-ai-gateway: <version>` so a client can tell it is talking to the gateway. `ProxyContext` is
@@ -17,6 +18,7 @@ use axum::http::HeaderValue;
 use axum::response::Response;
 use axum::routing::any;
 use axum::{Router, middleware};
+use axum_server::tls_rustls::RustlsConfig;
 use gateway_core::config::{BackendConfig, BackendsConfig, CaptureConfig, UnifiedConfig};
 use gateway_core::events::EventSender;
 use gateway_core::pricing::PricingTable;
@@ -86,6 +88,9 @@ pub enum ListenerMode {
 pub struct ListenerConfig {
     pub listen: SocketAddr,
     pub mode: ListenerMode,
+    /// HTTPS with the certificate the gateway's CA issued (`tls` under `[backends.<name>]` or `[unified]`,
+    /// resolved against the address).
+    pub tls: bool,
 }
 
 impl ListenerConfig {
@@ -99,6 +104,7 @@ impl ListenerConfig {
             .map(|listen| ListenerConfig {
                 listen: *listen,
                 mode: ListenerMode::Fixed(BackendUpstream::from_config(backend, cfg)),
+                tls: cfg.tls.enabled_for(*listen),
             })
             .collect()
     }
@@ -119,6 +125,7 @@ impl ListenerConfig {
                 mode: ListenerMode::Unified {
                     targets: targets.clone(),
                 },
+                tls: cfg.tls.enabled_for(*listen),
             })
             .collect()
     }
@@ -348,32 +355,50 @@ async fn stamp_gateway_header(mut response: Response) -> Response {
     response
 }
 
-/// Serves until `shutdown` flips, then waits for open connections (the caller bounds the wait).
+/// Serves until `shutdown` flips, then waits for open connections (the caller bounds the wait). With
+/// `tls`, the socket speaks HTTPS through axum-server's rustls acceptor, which serves hyper with upgrades,
+/// so the WebSocket tunnel works over TLS as well.
 pub async fn serve(
     listener: std::net::TcpListener,
     config: Arc<ListenerConfig>,
     ctx: Arc<ProxyContext>,
     mut shutdown: watch::Receiver<bool>,
+    tls: Option<RustlsConfig>,
 ) -> Result<()> {
-    let listener = TcpListener::from_std(listener).context("register proxy listener")?;
     let addr = listener.local_addr().context("proxy listener address")?;
-    info!(listen = %addr, target = %config.summary(), "proxy listener ready");
+    info!(listen = %addr, target = %config.summary(), tls = tls.is_some(), "proxy listener ready");
     let app = Router::new()
         .fallback(any(crate::pipeline::handle))
         .layer(middleware::map_response(stamp_gateway_header))
         .with_state(ProxyState {
             listener: config,
             ctx,
-        });
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        let _ = shutdown.changed().await;
-    })
-    .await
-    .context("proxy serve")
+        })
+        .into_make_service_with_connect_info::<SocketAddr>();
+    match tls {
+        Some(tls) => {
+            let handle = axum_server::Handle::new();
+            let stopper = handle.clone();
+            tokio::spawn(async move {
+                let _ = shutdown.changed().await;
+                stopper.graceful_shutdown(None);
+            });
+            axum_server::from_tcp_rustls(listener, tls)
+                .handle(handle)
+                .serve(app)
+                .await
+                .context("proxy serve (tls)")
+        }
+        None => {
+            let listener = TcpListener::from_std(listener).context("register proxy listener")?;
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown.changed().await;
+                })
+                .await
+                .context("proxy serve")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -400,6 +425,13 @@ mod tests {
         assert_eq!(listeners[1].listen.port(), 11435);
         assert_eq!(listeners[1].backends(), vec![Backend::Ollama]);
         assert_eq!(listeners[1].summary(), "ollama → http://127.0.0.1:11400");
+        assert!(!listeners[0].tls, "plain HTTP unless asked");
+        cfg.tls = gateway_core::config::TlsMode::On;
+        assert!(
+            ListenerConfig::from_backend(Backend::Ollama, &cfg)
+                .iter()
+                .all(|l| l.tls)
+        );
         cfg.enabled = false;
         assert!(ListenerConfig::from_backend(Backend::Ollama, &cfg).is_empty());
     }

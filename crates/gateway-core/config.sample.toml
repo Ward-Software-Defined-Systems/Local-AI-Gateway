@@ -8,8 +8,8 @@ listen = "127.0.0.1:8787"
 # Require the access token (printed at startup and by `local-ai-gateway --print-token`).
 # May only be false on a loopback address.
 auth = true
-# "auto" serves HTTPS with a self-signed certificate on non-loopback addresses and plain HTTP on loopback;
-# "on" and "off" force it.
+# "auto" serves HTTPS on non-loopback addresses and plain HTTP on loopback; "on" and "off" force it. The
+# certificate is issued by the gateway's own certificate authority ([tls] below).
 tls = "auto"
 token_file = "dashboard.token"
 
@@ -26,6 +26,9 @@ record_passthrough = true
 # Add stream_options.include_usage to streaming chat requests (/v1 and LM Studio's /api/v0) so token
 # counts arrive; LM Studio sends none without it.
 rewrite_include_usage = true
+# HTTPS on these listeners with the certificate the gateway's CA issues ([tls] below): "off" (the clients of a
+# local model server expect plain HTTP), "on", or "auto" (on for non-loopback addresses). Needs a restart.
+tls = "off"
 # Seconds between model-list polls.
 poll_interval_secs = 2
 # Optional, LM Studio only: the lms CLI and the app bundle, used for version lookup.
@@ -39,6 +42,7 @@ upstream = "http://127.0.0.1:11434"
 capture_bodies = true
 record_passthrough = true
 rewrite_include_usage = true
+tls = "off"
 poll_interval_secs = 2
 
 # The cloud providers are backends too. They are enabled by default but have no listener of their own, so
@@ -52,6 +56,7 @@ upstream = "https://api.anthropic.com"
 capture_bodies = true
 record_passthrough = true
 rewrite_include_usage = true
+tls = "off"
 
 [backends.gemini]
 enabled = true
@@ -60,6 +65,7 @@ upstream = "https://generativelanguage.googleapis.com"
 capture_bodies = true
 record_passthrough = true
 rewrite_include_usage = true
+tls = "off"
 
 [backends.openai]
 enabled = true
@@ -68,15 +74,18 @@ upstream = "https://api.openai.com"
 capture_bodies = true
 record_passthrough = true
 rewrite_include_usage = true
+tls = "off"
 
 # One listener for every backend. The target is picked per request: an explicit prefix (/anthropic/...,
 # /openai/..., /gemini/..., /lmstudio/..., /ollama/...) or a provider-specific path (/api/v0/*, /api/*,
 # /v1beta/*) first; then the model (an alias, the live LM Studio and Ollama model lists, a "provider/model"
 # spelling, the routes below, then claude-* / gemini-* / gpt-*); then a provider header; then
-# default_backend. The addresses need a restart; everything else reloads live.
+# default_backend. The addresses and tls need a restart; everything else reloads live.
 [unified]
 enabled = true
 listen = ["127.0.0.1:4000"]
+# HTTPS on this listener: "off", "on" or "auto" (on for non-loopback addresses), see [tls].
+tls = "off"
 default_backend = "lmstudio"
 # Aliases are rewritten to their target in the forwarded request:
 # [unified.aliases]
@@ -85,6 +94,15 @@ default_backend = "lmstudio"
 # [[unified.routes]]
 # model_prefix = "mistral-"
 # backend = "ollama"
+
+# The gateway's own certificate authority signs the certificate every HTTPS listener serves, dashboard and
+# proxy listeners alike. It is created on first start as <data dir>/tls/ca.pem; import that file into your
+# machines and applications once (`local-ai-gateway tls ca-cert` prints it, the Settings tab offers it). The
+# server certificate is reissued at every start for localhost, the loopback addresses, this machine's host
+# name, the specific addresses of TLS listeners and the names below.
+[tls]
+# Extra DNS names or IP addresses clients use to reach the gateway, e.g. ["gateway.lan", "192.168.1.10"].
+sans = []
 
 [capture]
 # Per stored body; larger bodies are truncated and flagged.

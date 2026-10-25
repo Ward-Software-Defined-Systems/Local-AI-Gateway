@@ -37,6 +37,7 @@ export default function RuntimePanel() {
             <ul>
               {s.listeners.map((l) => (
                 <li key={l.listen}>
+                  {l.tls ? 'https://' : 'http://'}
                   {l.listen} →{' '}
                   {l.unified ? (
                     <>
@@ -50,6 +51,20 @@ export default function RuntimePanel() {
                 </li>
               ))}
             </ul>
+          )}
+        </Row>
+        <Row label="tls">
+          CA {s.tls.ca_fingerprint_sha256 || '—'} ·{' '}
+          <a href="/api/tls/ca" download className="underline decoration-zinc-600 hover:text-zinc-100">
+            download the CA certificate
+          </a>
+          <br />
+          {s.tls.names.length > 0 ? (
+            <span className="text-zinc-500">
+              certificate for {s.tls.names.join(', ')} · valid to {s.tls.certificate_not_after}
+            </span>
+          ) : (
+            <span className="text-zinc-500">no https listener (set tls = &quot;on&quot; under [unified] or [backends.&lt;name&gt;])</span>
           )}
         </Row>
         <Row label="in flight">{formatInt(s.inflight)}</Row>
@@ -76,7 +91,8 @@ export default function RuntimePanel() {
       </dl>
       <p className="text-xs text-zinc-500 lg:col-span-2">
         The access token is never shown here. Print the dashboard URL with <code>local-ai-gateway --print-token</code>; to rotate the
-        token, delete the token file and restart.
+        token, delete the token file and restart. Clients of an https listener must trust the CA certificate above; the server
+        certificate is reissued at every start and needs no attention.
       </p>
     </div>
   )

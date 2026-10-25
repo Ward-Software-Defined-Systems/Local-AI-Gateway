@@ -33,7 +33,9 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 # rustls is a direct dependency so main can install one CryptoProvider (ring) explicitly: reqwest and
 # axum-server would otherwise each bring their own and rustls refuses to guess.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# rcgen mints the gateway CA and the server certificates; rustls-pki-types decodes PEM for the CA fingerprint.
 rcgen = "0.13"
+rustls-pki-types = { version = "1.15", default-features = false, features = ["std"] }
 
 # HTTP client: upstream requests, backend pollers, webhook sink. No http2: upstreams are plain-HTTP
 # localhost and the WebSocket tunnel needs HTTP/1.1.

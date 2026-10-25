@@ -604,9 +604,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "rcgen",
  "rusqlite",
+ "rustls-pki-types",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror",
  "tokio",
@@ -650,6 +653,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "axum-server",
  "bytes",
  "chrono",
  "futures-util",
@@ -1111,7 +1115,6 @@ dependencies = [
  "gateway-hardware",
  "gateway-proxy",
  "libc",
- "rcgen",
  "reqwest",
  "rust-embed",
  "rustls",

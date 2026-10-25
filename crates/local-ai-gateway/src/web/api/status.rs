@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use super::{ApiResult, ok};
 use crate::VERSION;
-use crate::web::AppState;
+use crate::web::{AppState, TlsSummary};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ListenerStatus {
@@ -23,6 +23,8 @@ pub struct ListenerStatus {
     /// Every backend the listener can send a request to.
     pub targets: Vec<Backend>,
     pub bound: bool,
+    /// HTTPS with the certificate the gateway's CA issued.
+    pub tls: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,6 +42,7 @@ pub struct Status {
     pub unacked_alerts: u64,
     pub dlp: DlpStatus,
     pub paths: PathsStatus,
+    pub tls: TlsSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -206,5 +209,6 @@ pub async fn api_status(State(st): State<AppState>) -> ApiResult<Status> {
                 .to_string(),
             logs_dir: paths.logs_dir().display().to_string(),
         },
+        tls: st.tls().clone(),
     })
 }

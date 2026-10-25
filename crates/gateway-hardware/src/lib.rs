@@ -18,6 +18,11 @@ pub mod sampler;
 
 pub use sampler::{SamplerConfig, run};
 
+/// This machine's host name as the system reports it: one of the names on the TLS certificate.
+pub fn host_name() -> Option<String> {
+    sysinfo::System::host_name()
+}
+
 /// Decimal units, as the TUIs and Activity Monitor show them.
 pub fn format_bytes(b: u64) -> String {
     let f = b as f64;

@@ -10,6 +10,7 @@ pub mod models;
 pub mod requests;
 pub mod session;
 pub mod status;
+pub mod tls;
 
 use axum::Json;
 use axum::http::{StatusCode, header};

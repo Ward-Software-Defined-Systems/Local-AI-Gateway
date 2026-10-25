@@ -30,6 +30,7 @@ use gateway_proxy::ProxyContext;
 use tokio::sync::watch;
 
 pub use api::status::ListenerStatus;
+pub use tls::TlsSummary;
 
 use crate::hot::Hot;
 
@@ -47,6 +48,8 @@ pub struct AppStateParts {
     pub proxy: Option<Arc<ProxyContext>>,
     pub listeners: Vec<ListenerStatus>,
     pub session_id: Option<i64>,
+    /// The CA and the certificate it issued at this start.
+    pub tls: TlsSummary,
 }
 
 struct Inner {
@@ -90,6 +93,12 @@ impl AppState {
             proxy: None,
             listeners: Vec::new(),
             session_id: None,
+            tls: TlsSummary {
+                ca_file: String::new(),
+                ca_fingerprint_sha256: String::new(),
+                names: Vec::new(),
+                certificate_not_after: None,
+            },
         })
     }
 
@@ -151,6 +160,10 @@ impl AppState {
         &self.inner.parts.listeners
     }
 
+    pub fn tls(&self) -> &TlsSummary {
+        &self.inner.parts.tls
+    }
+
     pub fn session_id(&self) -> Option<i64> {
         self.inner.parts.session_id
     }
@@ -208,6 +221,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/session/reset", post(api::session::api_reset))
         .route("/api/retention/run", post(api::session::api_retention_run))
         .route("/api/sessions", get(api::session::api_sessions))
+        .route("/api/tls/ca", get(api::tls::api_ca_cert))
         .route("/ws", get(ws::ws_handler))
         .fallback(assets::static_handler)
         .layer(middleware::from_fn_with_state(

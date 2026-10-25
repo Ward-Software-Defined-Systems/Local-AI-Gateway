@@ -30,6 +30,7 @@ use gateway_core::pricing::PricingTable;
 use gateway_core::routing::RoutingTable;
 use gateway_core::state::BackendsState;
 use gateway_core::store::{Store, StoreHandle};
+use gateway_core::tls::{SanName, server_names};
 use gateway_core::types::Platform;
 use gateway_hardware::SamplerConfig;
 use gateway_hardware::sampler::Latest;
@@ -38,10 +39,10 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::cli::{Cli, Command, ConfigAction, SetupAction};
+use crate::cli::{Cli, Command, ConfigAction, SetupAction, TlsAction};
 use crate::hot::{CliOverrides, Hot, HotParts};
 use crate::web::token::TokenSource;
-use crate::web::{AppState, AppStateParts, ListenerStatus};
+use crate::web::{AppState, AppStateParts, ListenerStatus, TlsSummary};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -88,6 +89,15 @@ fn run() -> Result<()> {
     }) = &cli.command
     {
         return config_init(&config_path, *force);
+    }
+
+    if let Some(Command::Tls {
+        action: TlsAction::CaCert,
+    }) = &cli.command
+    {
+        let ca = web::tls::authority(&paths.tls_dir())?;
+        print!("{}", ca.cert_pem());
+        return Ok(());
     }
 
     if let Some(Command::Service {
@@ -150,6 +160,13 @@ fn run() -> Result<()> {
             return Ok(());
         }
         bail!("setup check found failures");
+    }
+
+    if let Some(Command::Tls {
+        action: TlsAction::Show,
+    }) = &cli.command
+    {
+        return tls_show(&config, &paths);
     }
 
     if cli.check_config {
@@ -312,6 +329,18 @@ async fn serve_all(startup: Startup) -> Result<()> {
         hot.alert_settings(),
         shutdown_rx.clone(),
     ));
+    // One CA for the life of the data directory, one server certificate per start, shared by every HTTPS
+    // listener. The CA exists even when nothing serves HTTPS yet, so it can be imported ahead of time.
+    let dashboard_tls =
+        dashboard_listener.is_some() && config.dashboard.tls.enabled_for(config.dashboard.listen);
+    let (tls_config, tls_summary) = if dashboard_tls || proxy_listeners.iter().any(|(l, _)| l.tls) {
+        let prepared = web::tls::prepare(&paths.tls_dir(), &tls_names(&config)?).await?;
+        (Some(prepared.config), prepared.summary)
+    } else {
+        let ca = web::tls::authority(&paths.tls_dir())?;
+        (None, TlsSummary::ca_only(&ca))
+    };
+
     let mut listener_statuses = Vec::new();
     let mut proxy_tasks: Vec<JoinHandle<Result<()>>> = Vec::new();
     for (listener, socket) in proxy_listeners {
@@ -323,12 +352,15 @@ async fn serve_all(startup: Startup) -> Result<()> {
             upstream: fixed.map(|t| t.upstream.clone()),
             targets: listener.backends(),
             bound: true,
+            tls: listener.tls,
         });
+        let tls = listener.tls.then(|| tls_config.clone()).flatten();
         proxy_tasks.push(tokio::spawn(gateway_proxy::serve(
             socket,
             Arc::new(listener),
             proxy_ctx.clone(),
             shutdown_rx.clone(),
+            tls,
         )));
     }
     if proxy_tasks.is_empty() {
@@ -378,11 +410,7 @@ async fn serve_all(startup: Startup) -> Result<()> {
     if let Some(listener) = dashboard_listener {
         let listen = config.dashboard.listen;
         let tls_on = config.dashboard.tls.enabled_for(listen);
-        let tls = if tls_on {
-            Some(web::tls::load_or_create(&paths.tls_dir(), listen.ip()).await?)
-        } else {
-            None
-        };
+        let tls = if tls_on { tls_config.clone() } else { None };
         let state = AppState::new(AppStateParts {
             hot: hot.clone(),
             token: token.clone(),
@@ -395,6 +423,7 @@ async fn serve_all(startup: Startup) -> Result<()> {
             proxy: Some(proxy_ctx.clone()),
             listeners: listener_statuses,
             session_id: Some(session_id),
+            tls: tls_summary,
         });
         let app = web::router(state);
         // The URL carries the token, so it goes to the terminal once and never into the log.
@@ -565,6 +594,78 @@ async fn signal_task(shutdown: Arc<watch::Sender<bool>>, hot: Arc<Hot>) {
 }
 
 /// Service units must not depend on the working directory.
+/// Every address a TLS listener binds, with the section that configures it.
+fn tls_listeners(config: &Config) -> Vec<(String, std::net::SocketAddr)> {
+    let mut out = Vec::new();
+    if config.dashboard.tls.enabled_for(config.dashboard.listen) {
+        out.push(("dashboard".to_string(), config.dashboard.listen));
+    }
+    for (backend, cfg) in config.backends.enabled() {
+        for addr in &cfg.listen {
+            if cfg.tls.enabled_for(*addr) {
+                out.push((format!("backends.{backend}"), *addr));
+            }
+        }
+    }
+    if config.unified.enabled {
+        for addr in &config.unified.listen {
+            if config.unified.tls.enabled_for(*addr) {
+                out.push(("unified".to_string(), *addr));
+            }
+        }
+    }
+    out
+}
+
+/// The names on the server certificate: the defaults, `[tls] sans` and the specific addresses of the TLS
+/// listeners. Validation has already checked the configured names.
+fn tls_names(config: &Config) -> Result<Vec<SanName>> {
+    let extra = config
+        .tls
+        .sans
+        .iter()
+        .map(|name| SanName::parse(name).map_err(|err| anyhow::anyhow!("tls.sans: {err}")))
+        .collect::<Result<Vec<_>>>()?;
+    let host = gateway_hardware::host_name();
+    Ok(server_names(
+        host.as_deref(),
+        &extra,
+        tls_listeners(config).into_iter().map(|(_, addr)| addr.ip()),
+    ))
+}
+
+/// `tls show`: the CA, the names the certificate will carry and the HTTPS listeners.
+fn tls_show(config: &Config, paths: &Paths) -> Result<()> {
+    let ca = web::tls::authority(&paths.tls_dir())?;
+    println!("CA certificate:  {}", ca.cert_path().display());
+    println!("CA SHA-256:      {}", ca.fingerprint_sha256());
+    println!(
+        "Print it with `local-ai-gateway tls ca-cert` and import it where clients must trust the gateway."
+    );
+    let names: Vec<String> = tls_names(config)?.iter().map(ToString::to_string).collect();
+    println!(
+        "Certificate names (issued at every start, valid {} days): {}",
+        gateway_core::tls::SERVER_VALIDITY_DAYS,
+        names.join(", ")
+    );
+    let listeners = tls_listeners(config);
+    if listeners.is_empty() {
+        println!(
+            "HTTPS listeners: none (set tls = \"on\" under [unified], [backends.<name>] or [dashboard])"
+        );
+    } else {
+        println!("HTTPS listeners:");
+        for (section, addr) in listeners {
+            println!(
+                "  https://{}:{}  [{section}]",
+                display_host(addr.ip()),
+                addr.port()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn absolute(path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
@@ -636,6 +737,46 @@ mod tests {
     fn the_proxy_listeners_stamp_this_binarys_version() {
         assert_eq!(gateway_proxy::GATEWAY_VERSION, VERSION);
         assert_eq!(gateway_proxy::GATEWAY_HEADER, "x-local-ai-gateway");
+    }
+
+    #[test]
+    fn certificate_names_cover_defaults_configured_names_and_tls_listener_addresses() {
+        let config = Config::parse(
+            "[dashboard]\nlisten = \"192.168.1.10:8787\"\n[backends.ollama]\nlisten = [\"10.0.0.5:11435\", \"0.0.0.0:11436\"]\ntls = \"on\"\n[unified]\ntls = \"off\"\n[tls]\nsans = [\"gateway.lan\"]\n",
+        )
+        .unwrap();
+        let listeners = tls_listeners(&config);
+        assert_eq!(
+            listeners
+                .iter()
+                .map(|(s, a)| format!("{s} {a}"))
+                .collect::<Vec<_>>(),
+            vec![
+                "dashboard 192.168.1.10:8787",
+                "backends.ollama 10.0.0.5:11435",
+                "backends.ollama 0.0.0.0:11436"
+            ],
+            "auto on the dashboard off loopback counts; the unified listener is off"
+        );
+        let names: Vec<String> = tls_names(&config)
+            .unwrap()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        for expected in [
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "gateway.lan",
+            "192.168.1.10",
+            "10.0.0.5",
+        ] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "{expected} in {names:?}"
+            );
+        }
+        assert!(!names.contains(&"0.0.0.0".to_string()), "{names:?}");
     }
 
     #[test]

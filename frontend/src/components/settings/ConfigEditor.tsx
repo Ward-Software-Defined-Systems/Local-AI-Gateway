@@ -14,7 +14,7 @@ function Report({ report }: { report: ApplyReport }) {
       </p>
       {report.restart_required.length > 0 && (
         <p className="rounded bg-amber-500/15 px-2 py-1 text-amber-300">
-          Restart the gateway for: {report.restart_required.join(', ')}. Listeners, the dashboard address, hardware sampling and logging
+          Restart the gateway for: {report.restart_required.join(', ')}. Listeners, the dashboard address, TLS, hardware sampling and logging
           only change at start.
         </p>
       )}

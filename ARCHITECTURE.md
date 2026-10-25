@@ -24,7 +24,7 @@ runtime:
 |---|---|
 | dashboard server | axum-server over HTTP or TLS: token gate, embedded SPA, REST, `/ws` |
 | signal task | SIGINT/SIGTERM stop; SIGHUP reloads `config.toml` and the known-secrets file through `Hot` |
-| proxy listeners | one axum server per configured address: a fixed listener forwards to one backend, the unified listener picks the backend per request (`gateway-proxy`) |
+| proxy listeners | one axum server per configured address, over plain HTTP or (with `tls`) HTTPS through axum-server's rustls acceptor: a fixed listener forwards to one backend, the unified listener picks the backend per request (`gateway-proxy`) |
 | store writer | the only writing SQLite connection; batches commands into transactions (`gateway-core::store`) |
 | retention | deletes bodies, passthrough rows and raw hardware samples past their windows, every 10 minutes; reads the policy from `Hot` each run |
 | backend pollers | LM Studio and Ollama model lists and reachability, every 2 s (`gateway-backends`); the cloud providers are not polled because the gateway holds no keys |
@@ -42,7 +42,7 @@ table (default backend, aliases, routes). `Hot::apply` validates a whole configu
 DLP compile, known-secrets file), swaps the engine into the proxy's scanner slot, the capture policy,
 pricing and routing table into the proxy context, the alert settings and the retention policy, then
 publishes `config_changed` with the sections that differ from the boot configuration and only take effect
-on restart (`dashboard`, `backends.<name>`, `unified.listen`, `hardware`, `log`). CLI overrides (`--dashboard-listen`,
+on restart (`dashboard`, `backends.<name>`, `unified.listen`, `unified.tls`, `tls`, `hardware`, `log`). CLI overrides (`--dashboard-listen`,
 `--log-level`) are re-applied to every reload so a reload of the unchanged file is a no-op. `PUT /api/config`
 writes the file atomically (write, rename) and applies; `POST /api/config/reload` and SIGHUP re-read it.
 Errors leave everything as it was.
@@ -159,9 +159,27 @@ reaching a sink is built from masked fields only.
 `access.rs` gates every route on the token cookie (`laig_token`, HttpOnly, SameSite=Strict, Secure under
 TLS) or `?token=` (which passes `/api` and `/ws` directly and sets the cookie with a 303 elsewhere).
 `assets.rs` serves the embedded SPA with `Cache-Control: no-store` and a SPA fallback. REST handlers live
-under `web/api/` (status, models, hardware, metrics, requests, alerts, dlp, config, session); `ws.rs` sends
+under `web/api/` (status, models, hardware, metrics, requests, alerts, dlp, config, session, tls); `ws.rs` sends
 `hello` then every bus event verbatim and tells a lagging client to `resync`. `AppState` reads the
 configuration, engine and pricing through `Hot`, so a reload is visible to the next request.
+
+## TLS
+
+`gateway_core::tls` is the gateway's certificate authority. The first start mints `tls/ca.pem` and
+`tls/ca-key.pem` (ECDSA P-256, ten years, mode 0600 for the key) in the data directory; one file without the
+other is an error, never a silent replacement, because clients may trust what is there. Every start then
+issues a fresh server certificate (`tls/cert.pem`, `tls/key.pem`) for the names the listeners answer to:
+`localhost`, both loopback addresses, the host name (`gateway_hardware::host_name`), the configured `[tls]
+sans` and the specific addresses of the TLS listeners, valid 820 days (Apple's ceiling for a trusted server
+certificate) with `serverAuth` and an authority key identifier. The CA's distinguished name is fixed so a
+reloaded CA signs through parameters rebuilt around the stored key, which is what makes the leaf's issuer
+match `ca.pem` byte for byte without an X.509 parser in the tree; the proxy's handshake test proves the
+chain. `web/tls.rs` prepares the material once per start and builds one `RustlsConfig` that the dashboard
+and every proxy listener with `tls` share (`TlsMode::enabled_for` decides per address; the dashboard
+defaults to `auto`, the proxy listeners to `off`). TLS listeners run on axum-server's acceptor, which serves
+hyper with upgrades, so the WebSocket tunnel works over TLS; ALPN offers `h2` and `http/1.1`. The CA is
+printed by `tls ca-cert`, described by `tls show`, downloadable at `GET /api/tls/ca` and shown with its
+fingerprint in the Settings tab. Clients trust the CA; the leaf is not meant to be pinned.
 
 ## Invariants
 
@@ -184,6 +202,9 @@ configuration, engine and pricing through `Hot`, so a reload is visible to the n
   test box is stored or logged.
 - Unknown `config.toml` keys are errors. Validation errors stop startup and refuse a reload; warnings are logged.
 - `dashboard.auth = false` is only accepted on a loopback bind; `tls = "auto"` enables HTTPS off loopback.
+- Private keys (`tls/ca-key.pem`, `tls/key.pem`) and the token are written with mode 0600. The CA key never
+  leaves the data directory and is never logged or served; only `ca.pem` is. The server certificate is
+  reissued at every start, so nothing in the gateway depends on its continuity.
 - Tests need no terminal, sudo, GPU, LM Studio or Ollama; anything that touches the machine is `#[ignore]`.
 - A reload either applies whole or changes nothing.
 
@@ -260,5 +281,9 @@ servers.
 - Real spend is flat list price: cache discounts and tiers are not applied, Ollama `:cloud` has no price.
 - Schema v2 rows name the cloud providers; an older build fails whole page queries on them (`rows.rs`
   parses `backend` strictly), so the database file must not be shared with or downgraded to one.
+- The server certificate is valid 820 days from the start that issued it and is not renewed while the
+  process runs; `tls` and `[tls] sans` changes need a restart for the same reason, although axum-server
+  could reload the certificate live. Listeners stay unauthenticated under TLS; there are no client
+  certificates.
 - The reqwest root store is webpki; a corporate TLS interceptor in front of the providers would need
   `rustls-tls-native-roots`. Cloud uploads above the 64 MiB request cap get 413.

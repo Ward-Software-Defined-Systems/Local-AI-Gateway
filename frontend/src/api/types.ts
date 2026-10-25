@@ -178,6 +178,16 @@ export interface ListenerStatus {
   /** Every backend the listener can send a request to. */
   targets: Backend[]
   bound: boolean
+  /** HTTPS with the certificate the gateway's CA issued. */
+  tls: boolean
+}
+
+export interface TlsStatus {
+  ca_file: string
+  ca_fingerprint_sha256: string
+  /** Names on the server certificate; empty when no listener serves HTTPS. */
+  names: string[]
+  certificate_not_after: string | null
 }
 
 export interface BackendStatus {
@@ -232,6 +242,7 @@ export interface Status {
   unacked_alerts: number
   dlp: DlpStatus
   paths: PathsStatus
+  tls: TlsStatus
 }
 
 export interface SeriesPoint {

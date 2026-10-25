@@ -2,8 +2,8 @@
 //! `dashboard.token` (mode 0600) or taken from `LAIG_DASHBOARD_TOKEN`. `access.rs` compares it in
 //! constant time. It is never written to the log; `--print-token` is the way to see it again.
 
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -66,29 +66,7 @@ pub fn is_valid(token: &str) -> bool {
             .all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Writes a file readable by its owner only (mode 0600 on Unix), replacing any existing content.
-pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("create {}", path.display()))?;
-    file.write_all(bytes)
-        .with_context(|| format!("write {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        // An existing file keeps its old mode on open; tighten it too.
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod {}", path.display()))?;
-    }
-    Ok(())
-}
+pub use gateway_core::paths::write_private;
 
 #[cfg(test)]
 mod tests {

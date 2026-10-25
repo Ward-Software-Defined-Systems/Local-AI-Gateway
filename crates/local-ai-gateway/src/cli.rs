@@ -74,6 +74,19 @@ pub enum Command {
         #[command(subcommand)]
         action: SetupAction,
     },
+    /// The gateway's certificate authority: print its certificate, or show the HTTPS setup
+    Tls {
+        #[command(subcommand)]
+        action: TlsAction,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Subcommand, PartialEq, Eq)]
+pub enum TlsAction {
+    /// Print the CA certificate (PEM) to import wherever clients must trust the gateway; mints it if needed
+    CaCert,
+    /// Show the CA file and fingerprint, the names on the server certificate and the HTTPS listeners
+    Show,
 }
 
 #[derive(Debug, Clone, Copy, Subcommand, PartialEq, Eq)]
@@ -137,6 +150,20 @@ mod tests {
             cli.command,
             Some(Command::Setup {
                 action: SetupAction::Check
+            })
+        ));
+        let cli = Cli::try_parse_from(["laig", "tls", "ca-cert"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Tls {
+                action: TlsAction::CaCert
+            })
+        ));
+        let cli = Cli::try_parse_from(["laig", "tls", "show"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Tls {
+                action: TlsAction::Show
             })
         ));
     }

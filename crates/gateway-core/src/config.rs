@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::routing::{MAX_MODEL_REF_LEN, ModelRef, provider_id};
+use crate::tls::SanName;
 use crate::types::{Backend, DlpAction, ResponseAction, Severity};
 
 /// A commented `config.toml` holding every default, written by `config init`. A test keeps it equal to
@@ -28,6 +29,8 @@ pub struct Config {
     pub backends: BackendsConfig,
     /// The listener that routes each request to a backend by model name.
     pub unified: UnifiedConfig,
+    /// The names on the certificate every HTTPS listener serves, issued by the gateway's own CA.
+    pub tls: TlsConfig,
     pub capture: CaptureConfig,
     pub dlp: DlpConfig,
     pub alerts: AlertsConfig,
@@ -62,8 +65,10 @@ impl Default for DashboardConfig {
     }
 }
 
-/// `auto` serves HTTPS where the token and captured prompts would otherwise cross the network in the
-/// clear, and plain HTTP on loopback so the single-machine case has no certificate warning.
+/// HTTPS on a listener, with the certificate the gateway's CA issues (`[tls]`). `auto` turns it on for
+/// non-loopback binds, where tokens, keys and prompts would otherwise cross the network in the clear, and
+/// leaves loopback on plain HTTP. The dashboard defaults to `auto`; the proxy listeners default to `off`,
+/// because the clients of a local model server expect plain HTTP until they are told otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TlsMode {
@@ -80,6 +85,16 @@ impl TlsMode {
             TlsMode::Auto => !listen.ip().is_loopback(),
         }
     }
+}
+
+/// The gateway's certificate authority signs one server certificate for every HTTPS listener, dashboard
+/// and proxy listeners alike (`gateway_core::tls`). It always carries `localhost`, the loopback addresses,
+/// the host name and the specific addresses of TLS listeners; `sans` adds the other names clients use.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TlsConfig {
+    /// Extra DNS names or IP addresses for the server certificate, e.g. `["gateway.lan", "192.168.1.10"]`.
+    pub sans: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -150,6 +165,7 @@ struct BackendPatch {
     capture_bodies: Option<bool>,
     record_passthrough: Option<bool>,
     rewrite_include_usage: Option<bool>,
+    tls: Option<TlsMode>,
     poll_interval_secs: Option<u64>,
     lms_bin: Option<PathBuf>,
     app_path: Option<PathBuf>,
@@ -182,6 +198,8 @@ pub struct BackendConfig {
     /// Add `stream_options.include_usage` to streaming OpenAI-format requests so the final frame carries
     /// token counts. Anthropic's and Gemini's compat endpoints send none without it either.
     pub rewrite_include_usage: bool,
+    /// HTTPS on this backend's own listeners; `off` by default (see `TlsMode`).
+    pub tls: TlsMode,
     /// Local backends only: seconds between model-list polls. Cloud providers are not polled.
     pub poll_interval_secs: u64,
     /// LM Studio only: the `lms` CLI, for version lookup on Linux.
@@ -213,6 +231,7 @@ impl BackendConfig {
             capture_bodies: true,
             record_passthrough: true,
             rewrite_include_usage,
+            tls: TlsMode::Off,
             poll_interval_secs: 2,
             lms_bin: None,
             app_path: None,
@@ -238,6 +257,9 @@ impl BackendConfig {
         if let Some(v) = patch.rewrite_include_usage {
             self.rewrite_include_usage = v;
         }
+        if let Some(v) = patch.tls {
+            self.tls = v;
+        }
         if let Some(v) = patch.poll_interval_secs {
             self.poll_interval_secs = v;
         }
@@ -258,12 +280,15 @@ impl BackendConfig {
 /// The listener that serves every backend on one port and picks the target per request: an explicit path
 /// prefix or a provider-specific path family first, then the `model` (alias, live local model lists,
 /// `provider/model` spelling, `routes`, the built-in `claude-*` / `gemini-*` / `gpt-*` patterns), then a
-/// provider header, then `default_backend`. The addresses need a restart; everything else reloads live.
+/// provider header, then `default_backend`. The addresses and `tls` need a restart; everything else
+/// reloads live.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UnifiedConfig {
     pub enabled: bool,
     pub listen: Vec<SocketAddr>,
+    /// HTTPS on the unified listener; `off` by default (see `TlsMode`).
+    pub tls: TlsMode,
     /// Where a request goes when nothing else decides.
     pub default_backend: Backend,
     /// Alias → model reference, e.g. `fast = "ollama/gemma4:12b-mlx"`. The alias is rewritten to its
@@ -278,6 +303,7 @@ impl Default for UnifiedConfig {
         Self {
             enabled: true,
             listen: vec![SocketAddr::from(([127, 0, 0, 1], 4000))],
+            tls: TlsMode::Off,
             default_backend: Backend::LmStudio,
             aliases: BTreeMap::new(),
             routes: Vec::new(),
@@ -801,6 +827,40 @@ impl Config {
             prefixes.push(prefix);
         }
 
+        let mut plain: Vec<String> = Vec::new();
+        for (backend, cfg) in self.backends.enabled() {
+            for addr in &cfg.listen {
+                if !addr.ip().is_loopback() && !cfg.tls.enabled_for(*addr) {
+                    plain.push(format!("backends.{backend}.listen {addr}"));
+                }
+            }
+        }
+        if unified.enabled {
+            for addr in &unified.listen {
+                if !addr.ip().is_loopback() && !unified.tls.enabled_for(*addr) {
+                    plain.push(format!("unified.listen {addr}"));
+                }
+            }
+        }
+        if !plain.is_empty() {
+            issues.push(Issue::warning(format!(
+                "plain HTTP off loopback on {}: bearer tokens and provider keys cross the network unencrypted; set tls = \"on\" in that section and have clients trust tls/ca.pem",
+                plain.join(", ")
+            )));
+        }
+        let mut names: Vec<SanName> = Vec::new();
+        for (i, name) in self.tls.sans.iter().enumerate() {
+            match SanName::parse(name) {
+                Err(err) => issues.push(Issue::error(format!("tls.sans[{i}]: {err}"))),
+                Ok(parsed) => {
+                    if names.contains(&parsed) {
+                        issues.push(Issue::warning(format!("tls.sans[{i}] repeats {parsed}")));
+                    }
+                    names.push(parsed);
+                }
+            }
+        }
+
         for i in 0..listeners.len() {
             for j in (i + 1)..listeners.len() {
                 let (a, b) = (listeners[i].1, listeners[j].1);
@@ -1234,6 +1294,61 @@ mod tests {
                 .iter()
                 .any(|i| i.level == IssueLevel::Warning && i.message.contains("tls"))
         );
+    }
+
+    #[test]
+    fn tls_names_are_checked_and_plain_http_off_loopback_warns_once() {
+        let config = Config::parse(
+            "[backends.ollama]\nlisten = [\"0.0.0.0:11435\"]\n[unified]\nlisten = [\"0.0.0.0:4000\"]\n[tls]\nsans = [\"gateway.lan\", \"192.168.1.10\", \"bad_name\", \"Gateway.lan\"]\n",
+        )
+        .unwrap();
+        assert_eq!(config.backends.ollama.tls, TlsMode::Off);
+        assert_eq!(config.unified.tls, TlsMode::Off);
+        let issues = config.validate();
+        let errors: Vec<_> = issues
+            .iter()
+            .filter(|i| i.level == IssueLevel::Error)
+            .map(|i| i.message.as_str())
+            .collect();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("tls.sans[2]: "), "{errors:?}");
+        let warnings: Vec<_> = issues
+            .iter()
+            .filter(|i| i.level == IssueLevel::Warning)
+            .map(|i| i.message.as_str())
+            .collect();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("tls.sans[3] repeats gateway.lan")),
+            "{warnings:?}"
+        );
+        let plain: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.starts_with("plain HTTP off loopback on "))
+            .collect();
+        assert_eq!(
+            plain.len(),
+            1,
+            "one line names every listener: {warnings:?}"
+        );
+        assert!(plain[0].contains("backends.ollama.listen 0.0.0.0:11435"));
+        assert!(plain[0].contains("unified.listen 0.0.0.0:4000"));
+
+        let config = Config::parse(
+            "[backends.ollama]\nlisten = [\"0.0.0.0:11435\"]\ntls = \"on\"\n[unified]\nlisten = [\"0.0.0.0:4000\"]\ntls = \"auto\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.backends.ollama.tls, TlsMode::On);
+        assert_eq!(config.unified.tls, TlsMode::Auto);
+        assert!(
+            !config
+                .validate()
+                .iter()
+                .any(|i| i.message.starts_with("plain HTTP off loopback")),
+            "TLS on both: nothing to warn about"
+        );
+        assert!(Config::parse("[tls]\nnames = []\n").is_err(), "unknown key");
     }
 
     #[test]

@@ -28,7 +28,6 @@ axum-server.workspace = true
 chrono.workspace = true
 clap.workspace = true
 futures-util.workspace = true
-rcgen.workspace = true
 rust-embed.workspace = true
 rustls.workspace = true
 serde.workspace = true

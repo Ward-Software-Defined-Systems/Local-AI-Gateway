@@ -13,6 +13,7 @@ use axum::extract::Request;
 use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::routing::{any, get, post};
+use axum_server::tls_rustls::RustlsConfig;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use gateway_core::config::UnifiedConfig;
@@ -45,6 +46,8 @@ struct TestProxy {
 
 struct Options {
     backend: Backend,
+    /// Serve HTTPS with this certificate instead of plain HTTP.
+    tls: Option<RustlsConfig>,
     capture_bodies: bool,
     record_passthrough: bool,
     rewrite_include_usage: bool,
@@ -57,6 +60,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             backend: Backend::Ollama,
+            tls: None,
             capture_bodies: true,
             record_passthrough: true,
             rewrite_include_usage: true,
@@ -76,7 +80,8 @@ async fn spawn_upstream(router: Router) -> String {
 
 fn start_proxy(upstream: String, opts: Options) -> TestProxy {
     let listener = bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+    let scheme = if opts.tls.is_some() { "https" } else { "http" };
+    let url = format!("{scheme}://{}", listener.local_addr().unwrap());
     let (events, rx) = gateway_core::events::channel();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let ctx = ProxyContext::new(
@@ -105,8 +110,9 @@ fn start_proxy(upstream: String, opts: Options) -> TestProxy {
                 rewrite_include_usage: opts.rewrite_include_usage,
             },
         }),
+        tls: opts.tls.is_some(),
     });
-    tokio::spawn(serve(listener, config, ctx.clone(), shutdown_rx));
+    tokio::spawn(serve(listener, config, ctx.clone(), shutdown_rx, opts.tls));
     TestProxy {
         url,
         events: rx,
@@ -679,6 +685,81 @@ async fn a_cloud_listener_redacts_the_key_query_and_passes_redirects_through() {
     assert!(record.is_cloud);
 }
 
+/// A TLS listener serves HTTPS with a certificate the gateway's CA issued for its names. A client that
+/// trusts the CA connects by IP address or by DNS name and gets ordinary records; one that does not trust
+/// it is refused, and so is plain HTTP on the port. The CA is reloaded from disk first, as a second start
+/// does, so the leaf is signed through the rebuilt issuer parameters.
+#[tokio::test]
+async fn a_tls_listener_serves_https_under_the_gateway_ca() {
+    use gateway_core::tls::{Authority, Provenance, SanName};
+    let dir = tempfile::tempdir().unwrap();
+    let (_, how) = Authority::load_or_create(dir.path()).unwrap();
+    assert_eq!(how, Provenance::Created);
+    let (ca, how) = Authority::load_or_create(dir.path()).unwrap();
+    assert_eq!(how, Provenance::Loaded);
+    let issued = ca
+        .issue_server(&[
+            SanName::Ip("127.0.0.1".parse().unwrap()),
+            SanName::Dns("gateway.test".into()),
+        ])
+        .unwrap();
+    let tls = RustlsConfig::from_pem(issued.cert_pem.into_bytes(), issued.key_pem.into_bytes())
+        .await
+        .unwrap();
+    let mock = Router::new().route("/api/tags", get(|| async { r#"{"models":[]}"# }));
+    let mut proxy = spawn_proxy(
+        mock,
+        Options {
+            tls: Some(tls),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(proxy.url.starts_with("https://127.0.0.1:"), "{}", proxy.url);
+    let port: u16 = proxy.url.rsplit(':').next().unwrap().parse().unwrap();
+    let root = reqwest::Certificate::from_pem(ca.cert_pem().as_bytes()).unwrap();
+    let trusting = reqwest::Client::builder()
+        .add_root_certificate(root)
+        .resolve("gateway.test", ([127, 0, 0, 1], port).into())
+        .build()
+        .unwrap();
+
+    let resp = trusting
+        .get(format!("{}/api/tags", proxy.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK, "by IP address");
+    assert_eq!(gateway_header(&resp), vec![GATEWAY_VERSION]);
+    assert_eq!(resp.text().await.unwrap(), r#"{"models":[]}"#);
+    let record = next_record(&mut proxy.events).await;
+    assert_eq!(record.path, "/api/tags");
+    assert_eq!(record.backend, Backend::Ollama);
+
+    let resp = trusting
+        .get(format!("https://gateway.test:{port}/api/tags"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK, "by DNS name");
+    next_record(&mut proxy.events).await;
+
+    let untrusting = reqwest::Client::new()
+        .get(format!("{}/api/tags", proxy.url))
+        .send()
+        .await;
+    assert!(untrusting.is_err(), "a client without the CA is refused");
+    let plain = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/api/tags"))
+        .send()
+        .await;
+    assert!(plain.is_err(), "plain HTTP on a TLS port fails");
+    assert!(
+        no_record_within(&mut proxy.events, Duration::from_millis(300)).await,
+        "failed handshakes leave no record"
+    );
+}
+
 /// Every value of the gateway's own response header, so a test sees a duplicate as well as a wrong value.
 fn gateway_header(resp: &reqwest::Response) -> Vec<String> {
     resp.headers()
@@ -1178,8 +1259,9 @@ fn start_unified(
     let config = Arc::new(ListenerConfig {
         listen: listener.local_addr().unwrap(),
         mode: ListenerMode::Unified { targets },
+        tls: false,
     });
-    tokio::spawn(serve(listener, config, ctx.clone(), shutdown_rx));
+    tokio::spawn(serve(listener, config, ctx.clone(), shutdown_rx, None));
     TestProxy {
         url,
         events: rx,

@@ -303,6 +303,12 @@ pub fn restart_required(boot: &Config, next: &Config) -> Vec<String> {
     if boot.unified.enabled != next.unified.enabled || boot.unified.listen != next.unified.listen {
         out.push("unified.listen".to_string());
     }
+    if boot.unified.tls != next.unified.tls {
+        out.push("unified.tls".to_string());
+    }
+    if boot.tls != next.tls {
+        out.push("tls".to_string());
+    }
     if boot.hardware != next.hardware {
         out.push("hardware".to_string());
     }
@@ -379,6 +385,18 @@ mod tests {
         assert!(!dir.path().join("config.toml.tmp").exists());
         // The CLI override is re-applied, so the file's dashboard address is not a restart item.
         assert_eq!(hot.config().dashboard.listen.port(), 1);
+    }
+
+    #[test]
+    fn tls_changes_are_restart_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let hot = hot_in(dir.path());
+        let report = hot
+            .save_and_apply("[unified]\ntls = \"on\"\n[tls]\nsans = [\"gateway.lan\"]\n")
+            .unwrap();
+        assert_eq!(report.restart_required, vec!["unified.tls", "tls"]);
+        assert!(report.applied.is_empty(), "{:?}", report.applied);
+        assert_eq!(hot.config().tls.sans, vec!["gateway.lan"]);
     }
 
     #[test]
