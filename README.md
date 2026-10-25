@@ -1,5 +1,7 @@
 # WSDS Local AI Gateway
 
+> **Development branch.** You are reading the `unified-router` branch, which adds the unified listener and the Anthropic, Gemini and OpenAI backends described below. It is still under test and may change or be rebased. For a working release use the `main` branch; this notice goes when the branch is merged.
+
 A monitoring, inspection and data-loss-prevention reverse proxy for local LLM servers, with a web dashboard. It sits in front of **LM Studio** and **Ollama**, records every request's tokens, time to first token and throughput, prices them at frontier-API list rates, keeps a searchable copy of each request for debugging, scans prompts and replies for secrets and personal data, alerts you, and shows hardware telemetry, all from one binary. A unified listener routes by model name to those two servers or to **Anthropic**, **Gemini** and **OpenAI**, so the same scanning, recording and cost tracking covers the traffic that really leaves the machine.
 
 It replaces the two terminal monitors it grew out of, [LMS-Monitor](https://github.com/Ward-Software-Defined-Systems/LMS-Monitor) and [Ollama-Monitor](https://github.com/Ward-Software-Defined-Systems/Ollama-Monitor).
