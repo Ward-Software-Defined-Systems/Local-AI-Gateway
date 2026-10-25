@@ -1,0 +1,12 @@
+data: {"id":"msg_011CgNA2zPpaH8t1Qoax5T3H","choices":[{"index":0,"delta":{"role":"assistant"}}],"created":1792894850,"model":"claude-haiku-5-5","object":"chat.completion.chunk"            }
+
+data: {"id":"msg_011CgNA2zPpaH8t1Qoax5T3H","choices":[{"index":0,"delta":{"content":"Hi there"}}],"created":1792894850,"model":"claude-haiku-5-5","object":"chat.completion.chunk"   }
+
+data: {"id":"msg_011CgNA2zPpaH8t1Qoax5T3H","choices":[{"index":0,"delta":{"content":"! How can I help you today"}}],"created":1792894850,"model":"claude-haiku-5-5","object":"chat.completion.chunk"          }
+
+data: {"id":"msg_011CgNA2zPpaH8t1Qoax5T3H","choices":[{"index":0,"delta":{"content":"?"}}],"created":1792894850,"model":"claude-haiku-5-5","object":"chat.completion.chunk"}
+
+data: {"id":"msg_011CgNA2zPpaH8t1Qoax5T3H","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"created":1792894850,"model":"claude-haiku-5-5","object":"chat.completion.chunk"             }
+
+data: [DONE]
+

@@ -1,7 +1,7 @@
 //! Embedding responses: one JSON object, no text. OpenAI-compatible (`/v1/embeddings`, LM Studio
 //! `/api/v0/embeddings`) reports `usage.prompt_tokens`; Ollama's `/api/embed` reports `prompt_eval_count`
 //! and `total_duration` (older `/api/embeddings` reports neither, so the record keeps no counts); Gemini's
-//! `:embedContent` reports nothing but the vector.
+//! `:embedContent` reports `usageMetadata.promptTokenCount` beside the vector (`fixtures/gemini`).
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -23,12 +23,21 @@ struct Body {
     usage: Option<Usage>,
     prompt_eval_count: Option<u64>,
     total_duration: Option<u64>,
+    #[serde(rename = "usageMetadata")]
+    usage_metadata: Option<UsageMetadata>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct Usage {
     prompt_tokens: Option<u64>,
+}
+
+/// Gemini's usage object on an embedding answer.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct UsageMetadata {
+    prompt_token_count: Option<u64>,
 }
 
 pub struct EmbeddingsParser {
@@ -98,6 +107,7 @@ impl StreamParser for EmbeddingsParser {
                 parsed.timings_estimated = body.total_duration.is_none();
             }
             Flavor::Gemini => {
+                parsed.prompt_tokens = body.usage_metadata.and_then(|u| u.prompt_token_count);
                 parsed = parsed.with_wall_timings(wall, false);
             }
         }
@@ -162,17 +172,27 @@ mod tests {
         assert_eq!(parsed.in_stream_error.as_deref(), Some("model not loaded"));
     }
 
+    /// `gemini-embedding-2` answering `:embedContent` (16 dimensions asked for): the vector and a
+    /// `usageMetadata` with the prompt size, no model name.
     #[test]
-    fn gemini_embeddings_carry_no_counts() {
-        // The documented `:embedContent` answer: a vector and nothing else.
-        let gemini = br#"{"embedding":{"values":[0.013,-0.008,0.021]}}"#;
+    fn fixture_gemini_embeddings_report_prompt_tokens() {
+        const EMBED: &[u8] = include_bytes!("../../../../fixtures/gemini/embedcontent.json");
         let parsed =
-            parse_all(Box::new(EmbeddingsParser::new(Flavor::Gemini)), gemini, 16).unwrap();
-        assert_eq!(parsed.prompt_tokens, None);
+            parse_all(Box::new(EmbeddingsParser::new(Flavor::Gemini)), EMBED, 4096).unwrap();
+        assert_eq!(
+            parsed.prompt_tokens,
+            Some(3),
+            "usageMetadata.promptTokenCount"
+        );
         assert_eq!(parsed.gen_tokens, Some(0));
         assert_eq!(parsed.stop_reason.as_deref(), Some("embeddings"));
-        assert_eq!(parsed.model, None);
+        assert_eq!(parsed.model, None, "the answer does not name the model");
         assert!(parsed.timings_estimated);
+        // The documented minimum, a vector alone, keeps no count.
+        let bare = br#"{"embedding":{"values":[0.013,-0.008,0.021]}}"#;
+        let parsed = parse_all(Box::new(EmbeddingsParser::new(Flavor::Gemini)), bare, 16).unwrap();
+        assert_eq!(parsed.prompt_tokens, None);
+        assert_eq!(parsed.gen_tokens, Some(0));
         let error =
             br#"{"error":{"code":400,"message":"API key not valid.","status":"INVALID_ARGUMENT"}}"#;
         let parsed = parse_all(Box::new(EmbeddingsParser::new(Flavor::Gemini)), error, 16).unwrap();

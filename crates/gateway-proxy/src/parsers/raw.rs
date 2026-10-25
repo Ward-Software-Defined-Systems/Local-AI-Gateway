@@ -56,9 +56,10 @@ mod tests {
 
     #[test]
     fn the_raw_parser_keeps_the_text_and_reports_no_counts() {
-        let body = br#"{"input_tokens":12}"#;
+        // Gemini's answer to `:countTokens`, which the gateway forwards as cloud passthrough.
+        let body = include_bytes!("../../../../fixtures/gemini/counttokens.json");
         let parsed = parse_all(Box::new(RawTextParser::new()), body, 5).unwrap();
-        assert_eq!(parsed.text, r#"{"input_tokens":12}"#);
+        assert_eq!(parsed.text.as_bytes(), &body[..]);
         assert_eq!(parsed.prompt_tokens, None);
         assert_eq!(parsed.gen_tokens, None);
         assert_eq!(parsed.stop_reason, None);

@@ -203,12 +203,21 @@ with the "tokens to keep from the initial prompt" wording and no numbers: 400 on
 as `rejected`, records the status the client received, and takes the context length from the latest model
 list when the message has none.
 
-There are no captures from the cloud providers yet. The Gemini parser (`parsers/gemini.rs`: SSE frames
-with `alt=sse`, one object, or a JSON array parsed when complete; cumulative `usageMetadata`, the last
-chunk wins; `thoughtsTokenCount` counted as output and thought parts kept as reply text) and the providers'
-OpenAI-compatible paths are tested against the documented shapes; the Anthropic and OpenAI formats are
-covered by the LM Studio and Ollama captures. The first captures from Anthropic and Gemini will settle
-whether their compat endpoints accept `stream_options` (`rewrite_include_usage` is off for Gemini until then).
+`fixtures/anthropic` and `fixtures/gemini` were captured on 2026-10-24 from the real APIs with
+`claude-haiku-5-5`, `gemini-3.5-flash-lite` and `gemini-embedding-2`, the same "Say hi." prompt and a small
+`max_tokens`. What they settled: both providers' OpenAI-compatible chat endpoints send usage only when the
+request carries `stream_options.include_usage` (Anthropic as a trailing frame with empty `choices`, Gemini on
+every chunk with cumulative counts), so `rewrite_include_usage` is on for every backend; Anthropic's
+`message_delta` repeats `input_tokens` beside the final `output_tokens` and the stream carries a `ping`
+event; Gemini's last SSE frame holds an empty text part with only a `thoughtSignature`, its `usageMetadata`
+repeats on every frame, reasoning is billed as `thoughtsTokenCount` with no thought part returned even when
+`includeThoughts` is set (so `gen_tokens` is candidates plus thoughts and a thought part in the text is
+tested on the documented shape), and `:embedContent` reports `usageMetadata.promptTokenCount`. Both
+unknown-model refusals are 404s carrying the providers' ordinary error objects; Google answers an `alt=sse`
+request's error with a bare JSON object under `text/event-stream`, which the error branch parses like any
+other body. The Gemini parser (`parsers/gemini.rs`) reads SSE frames with `alt=sse`, one object, or a JSON
+array parsed when complete. There is no OpenAI capture: the OpenAI shapes are covered by the other four
+servers.
 
 ## Known gaps
 

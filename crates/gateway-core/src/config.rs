@@ -180,7 +180,7 @@ pub struct BackendConfig {
     pub capture_bodies: bool,
     pub record_passthrough: bool,
     /// Add `stream_options.include_usage` to streaming OpenAI-format requests so the final frame carries
-    /// token counts. Off for Gemini until a capture shows its OpenAI-compatible endpoint accepts it.
+    /// token counts. Anthropic's and Gemini's compat endpoints send none without it either.
     pub rewrite_include_usage: bool,
     /// Local backends only: seconds between model-list polls. Cloud providers are not polled.
     pub poll_interval_secs: u64,
@@ -196,11 +196,13 @@ impl BackendConfig {
         let (listen, upstream, rewrite_include_usage) = match backend {
             Backend::LmStudio => (loopback(1235), "http://127.0.0.1:1234".to_string(), true),
             Backend::Ollama => (loopback(11435), "http://127.0.0.1:11434".to_string(), true),
+            // The cloud providers' OpenAI-compatible endpoints send usage only when asked, like LM Studio
+            // (settled by the Anthropic and Gemini captures in `fixtures/`).
             Backend::Anthropic => (Vec::new(), "https://api.anthropic.com".to_string(), true),
             Backend::Gemini => (
                 Vec::new(),
                 "https://generativelanguage.googleapis.com".to_string(),
-                false,
+                true,
             ),
             Backend::OpenAi => (Vec::new(), "https://api.openai.com".to_string(), true),
         };
@@ -1091,9 +1093,12 @@ mod tests {
                 b.upstream
             );
         }
-        assert!(cfg.backends.anthropic.rewrite_include_usage);
-        assert!(!cfg.backends.gemini.rewrite_include_usage);
-        assert!(cfg.backends.openai.rewrite_include_usage);
+        for backend in Backend::CLOUD_PROVIDERS {
+            assert!(
+                cfg.backends.get(backend).rewrite_include_usage,
+                "{backend}: usage comes only with stream_options"
+            );
+        }
         let cfg =
             Config::parse("[backends.gemini]\nupstream = \"http://gemini.example.net\"\n").unwrap();
         let errs = errors(&cfg);

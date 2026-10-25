@@ -1299,7 +1299,9 @@ pub fn gateway_error_response(meta: &RequestMeta, err: &ProxyError) -> Response 
 }
 
 /// The client's response: the upstream status and headers minus hop-by-hop ones and `content-length`
-/// (everything streams as chunked), plus the request id.
+/// (everything streams as chunked), plus the request id. An upstream `x-request-id` (Anthropic's
+/// OpenAI-compatible endpoint sends one) is left out of the client's copy so the header names the gateway
+/// record alone; it stays in the record's stored response headers.
 pub fn build_response(
     meta: &RequestMeta,
     status: StatusCode,
@@ -1310,7 +1312,11 @@ pub fn build_response(
     let tokens = http::connection_tokens(upstream_headers);
     for (name, value) in upstream_headers {
         let lower = name.as_str().to_ascii_lowercase();
-        if http::is_hop_by_hop(&lower) || lower == "content-length" || tokens.contains(&lower) {
+        if http::is_hop_by_hop(&lower)
+            || lower == "content-length"
+            || lower == "x-request-id"
+            || tokens.contains(&lower)
+        {
             continue;
         }
         builder = builder.header(name.clone(), value.clone());

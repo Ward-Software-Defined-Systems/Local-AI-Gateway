@@ -270,6 +270,53 @@ mod tests {
     const OLLAMA_V1_COMPLETIONS_SSE: &[u8] =
         include_bytes!("../../../../fixtures/ollama/v1-completions-sse.txt");
     const THINKING: &str = "Here's a thinking process:\n\n";
+    const ANTHROPIC_COMPAT_OPTS: &[u8] =
+        include_bytes!("../../../../fixtures/anthropic/v1-chat-sse-with-stream-options.txt");
+    const ANTHROPIC_COMPAT_NO_OPTS: &[u8] =
+        include_bytes!("../../../../fixtures/anthropic/v1-chat-sse-without-stream-options.txt");
+    const GEMINI_COMPAT_OPTS: &[u8] =
+        include_bytes!("../../../../fixtures/gemini/openai-chat-sse-with-stream-options.txt");
+    const GEMINI_COMPAT_NO_OPTS: &[u8] =
+        include_bytes!("../../../../fixtures/gemini/openai-chat-sse-without-stream-options.txt");
+
+    /// Anthropic's and Gemini's OpenAI-compatible endpoints send usage only when the request carries
+    /// `stream_options.include_usage`: Anthropic as a trailing frame with empty `choices`, Gemini on every
+    /// chunk with cumulative counts (the last one wins). Hence `rewrite_include_usage` is on for both.
+    #[test]
+    fn fixture_cloud_compat_streams_report_usage_only_with_stream_options() {
+        let chat =
+            |body| parse_all(Box::new(OpenAiParser::new(Flavor::Chat, true)), body, 97).unwrap();
+        let anthropic = chat(ANTHROPIC_COMPAT_OPTS);
+        assert_eq!(anthropic.model.as_deref(), Some("claude-haiku-5-5"));
+        assert_eq!(
+            (anthropic.prompt_tokens, anthropic.gen_tokens),
+            (Some(13), Some(14))
+        );
+        assert!(!anthropic.tokens_estimated);
+        assert_eq!(anthropic.stop_reason.as_deref(), Some("stop"));
+        assert_eq!(anthropic.text, "Hi there! How can I help you today?");
+        let anthropic = chat(ANTHROPIC_COMPAT_NO_OPTS);
+        assert!(anthropic.tokens_estimated);
+        assert_eq!(anthropic.prompt_tokens, None);
+        assert_eq!(anthropic.gen_tokens, Some(5), "five choice frames stand in");
+        assert_eq!(anthropic.stop_reason.as_deref(), Some("stop"));
+        assert_eq!(anthropic.text, "Hi there! How can I help you today?");
+
+        let gemini = chat(GEMINI_COMPAT_OPTS);
+        assert_eq!(gemini.model.as_deref(), Some("gemini-3.5-flash-lite"));
+        assert_eq!(
+            (gemini.prompt_tokens, gemini.gen_tokens),
+            (Some(4), Some(9)),
+            "the last cumulative usage, not the first chunk's"
+        );
+        assert!(!gemini.tokens_estimated);
+        assert_eq!(gemini.stop_reason.as_deref(), Some("stop"));
+        assert_eq!(gemini.text, "Hi! How can I help you today?");
+        let gemini = chat(GEMINI_COMPAT_NO_OPTS);
+        assert!(gemini.tokens_estimated);
+        assert_eq!(gemini.gen_tokens, Some(3), "three choice frames stand in");
+        assert_eq!(gemini.text, "Hi! How can I help you today?");
+    }
 
     /// LM Studio 0.4.25: a `/v1/chat/completions` stream carries no usage frame unless the request asks
     /// for it, which is why the gateway adds `stream_options.include_usage`.

@@ -115,7 +115,7 @@ The status bar shows backend reachability and versions, the live-socket state, u
 
 "Live" sections apply when you save in the Settings tab, call `POST /api/config/reload`, or send `SIGHUP`. The Settings tab shows which sections still need a restart.
 
-`rewrite_include_usage` adds `stream_options.include_usage` to streaming chat and completion requests (`/v1/chat/completions`, `/v1/completions` and LM Studio's `/api/v0/chat/completions`). LM Studio sends no token counts on a stream without it; Ollama sends them either way; it is off for Gemini until a capture shows its OpenAI-compatible endpoint accepts it. On the per-backend listeners it is the only change the gateway makes to a request. The unified listener also strips an explicit `/anthropic/`-style prefix from the path, rewrites `model` when an alias or a `provider/model` spelling resolved it, sends OpenAI-format requests for Gemini to `/v1beta/openai/…`, and removes `accept-encoding` from requests to cloud providers so their answers arrive uncompressed and can be parsed. Everything else is forwarded byte for byte.
+`rewrite_include_usage` adds `stream_options.include_usage` to streaming chat and completion requests (`/v1/chat/completions`, `/v1/completions` and LM Studio's `/api/v0/chat/completions`). LM Studio sends no token counts on a stream without it, and neither do Anthropic's and Gemini's OpenAI-compatible endpoints; Ollama sends them either way; so it is on for every backend. On the per-backend listeners it is the only change the gateway makes to a request. The unified listener also strips an explicit `/anthropic/`-style prefix from the path, rewrites `model` when an alias or a `provider/model` spelling resolved it, sends OpenAI-format requests for Gemini to `/v1beta/openai/…`, and removes `accept-encoding` from requests to cloud providers so their answers arrive uncompressed and can be parsed. Everything else is forwarded byte for byte.
 
 ## DLP
 
@@ -214,7 +214,7 @@ Request metadata and findings are kept indefinitely; bodies expire after `retent
 - Open streams that outlive the five-second shutdown grace are cut without a record.
 - Reply text is scanned once at the end of the response, not incrementally.
 - Changing a backend's `capture_bodies`, `record_passthrough` or `rewrite_include_usage` needs a restart.
-- The Gemini parser and the providers' OpenAI-compatible paths are tested against the documented shapes; real captures from Anthropic and Gemini are still to be taken, and `rewrite_include_usage` stays off for Gemini until they settle whether its compat endpoint accepts `stream_options`. There is no OpenAI capture at all.
+- There is no OpenAI capture: the OpenAI shapes are tested on the LM Studio, Ollama, Anthropic and Gemini captures. Gemini returns no thought text even when asked for it, so a thought part in the reply is tested on the documented shape only.
 - A Gemini stream requested without `alt=sse` is a JSON array; it is parsed once it is complete, so its figures arrive at the end.
 - The cloud providers are not polled: no reachability, version or model list for them in the dashboard, and the merged `GET /v1/models` answer lists only the local servers' models and your aliases. That answer is gateway-generated and not recorded.
 - A model-less request with a body and no provider header goes to `default_backend`; use a prefix to force the target.

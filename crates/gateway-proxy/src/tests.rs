@@ -683,6 +683,10 @@ async fn a_cloud_listener_redacts_the_key_query_and_passes_redirects_through() {
 /// cost at list price is a round number.
 const CHAT_JSON: &str = r#"{"id":"chatcmpl-1","object":"chat.completion","created":0,"model":"claude-opus-5-5","choices":[{"index":0,"message":{"role":"assistant","content":"Hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000000,"completion_tokens":1000000,"total_tokens":2000000}}"#;
 
+/// Anthropic's real answer to `POST /v1/messages/count_tokens`.
+const COUNT_TOKENS_JSON: &str =
+    include_str!("../../../fixtures/anthropic/v1-messages-count-tokens.json");
+
 /// A POST outside the inference formats to a cloud provider is scanned and recorded with its bodies; a
 /// finding under a blocking policy stops it with the provider's own error shape.
 #[tokio::test]
@@ -697,7 +701,7 @@ async fn a_cloud_post_outside_the_inference_formats_is_scanned_and_recorded() {
                 hits.fetch_add(1, Ordering::SeqCst);
                 (
                     [(header::CONTENT_TYPE, "application/json")],
-                    r#"{"input_tokens":12}"#,
+                    COUNT_TOKENS_JSON,
                 )
             }
         }),
@@ -752,12 +756,12 @@ async fn a_cloud_post_outside_the_inference_formats_is_scanned_and_recorded() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    assert_eq!(resp.text().await.unwrap(), r#"{"input_tokens":12}"#);
+    assert_eq!(resp.text().await.unwrap(), COUNT_TOKENS_JSON);
     let record = next_record(&mut clean.events).await;
     assert_eq!(record.api_format, ApiFormat::CloudPassthrough);
     assert_eq!(record.outcome, Outcome::Completed);
     assert_eq!(record.status, Some(200));
-    assert_eq!(record.response_bytes, r#"{"input_tokens":12}"#.len() as u64);
+    assert_eq!(record.response_bytes, COUNT_TOKENS_JSON.len() as u64);
     assert!(record.is_cloud);
     assert_eq!(
         record.prompt_tokens, None,
@@ -785,7 +789,14 @@ async fn cloud_targets_get_identity_encoding_and_a_real_cost() {
                         .and_then(|v| v.to_str().ok())
                         .map(str::to_string),
                 );
-                ([(header::CONTENT_TYPE, "application/json")], CHAT_JSON)
+                // Anthropic's compat endpoint names its own request id in `x-request-id`.
+                (
+                    [
+                        ("content-type", "application/json"),
+                        ("x-request-id", "req_upstream"),
+                    ],
+                    CHAT_JSON,
+                )
             }
         }),
     );
@@ -812,8 +823,28 @@ async fn cloud_targets_get_identity_encoding_and_a_real_cost() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let ids: Vec<String> = resp
+        .headers()
+        .get_all("x-request-id")
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        ids.len(),
+        1,
+        "the client sees the gateway's request id alone: {ids:?}"
+    );
     assert_eq!(resp.text().await.unwrap(), CHAT_JSON);
     let record = next_record(&mut cloud.events).await;
+    assert_eq!(ids[0], record.id.to_string());
+    assert!(
+        record
+            .response_headers
+            .iter()
+            .any(|(name, value)| name == "x-request-id" && value == "req_upstream"),
+        "the provider's id stays in the stored headers: {:?}",
+        record.response_headers
+    );
     assert_eq!(record.outcome, Outcome::Completed);
     assert!(record.is_cloud);
     assert_eq!(record.model_resolved.as_deref(), Some("claude-opus-5-5"));

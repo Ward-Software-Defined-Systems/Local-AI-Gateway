@@ -1,0 +1,8 @@
+data: {"choices":[{"delta":{"content":"Hi!","role":"assistant"},"index":0}],"created":1792894977,"id":"AWjdauOyH5eV_uMPjqbX6QE","model":"gemini-3.5-flash-lite","object":"chat.completion.chunk","usage":{"completion_tokens":2,"prompt_tokens":4,"total_tokens":6}}
+
+data: {"choices":[{"delta":{"content":" How can I help you today?","role":"assistant"},"index":0}],"created":1792894977,"id":"AWjdauOyH5eV_uMPjqbX6QE","model":"gemini-3.5-flash-lite","object":"chat.completion.chunk","usage":{"completion_tokens":9,"prompt_tokens":4,"total_tokens":13}}
+
+data: {"choices":[{"delta":{"extra_content":{"google":{"thought_signature":"EmAKXgFpFH0TeG5cUDMRQl+jKIh37BrA/zXxbqldnR5vIIYaMWcXH9cLHoWPGYpsc2q7IoWU3SM+7HF5Y4G2aemvxJc0zY/OgsrNUY/UGnne6MbZf5S0ekSPJjhMvu3lT0w="}},"role":"assistant"},"finish_reason":"stop","index":0}],"created":1792894977,"id":"AWjdauOyH5eV_uMPjqbX6QE","model":"gemini-3.5-flash-lite","object":"chat.completion.chunk","usage":{"completion_tokens":9,"prompt_tokens":4,"total_tokens":13}}
+
+data: [DONE]
+

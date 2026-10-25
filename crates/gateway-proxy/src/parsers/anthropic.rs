@@ -333,6 +333,40 @@ mod tests {
     const OLLAMA_STREAM: &[u8] = include_bytes!("../../../../fixtures/ollama/v1-messages-sse.txt");
     const OLLAMA_SINGLE: &[u8] =
         include_bytes!("../../../../fixtures/ollama/v1-messages-nonstream.json");
+    const ANTHROPIC_STREAM: &[u8] =
+        include_bytes!("../../../../fixtures/anthropic/v1-messages-sse.txt");
+    const ANTHROPIC_SINGLE: &[u8] =
+        include_bytes!("../../../../fixtures/anthropic/v1-messages-nonstream.json");
+
+    /// The real API (`claude-haiku-5-5`): a `ping` event between the content block and its deltas, and a
+    /// `message_delta` whose usage repeats `input_tokens` beside the final `output_tokens`.
+    #[test]
+    fn fixture_anthropic_messages_stream_and_single() {
+        for chunk in [1, 7, 77, 4096] {
+            let s = parse_all(
+                Box::new(AnthropicParser::new(true)),
+                ANTHROPIC_STREAM,
+                chunk,
+            )
+            .unwrap();
+            assert_eq!(s.model.as_deref(), Some("claude-haiku-5-5"));
+            assert_eq!((s.prompt_tokens, s.gen_tokens), (Some(13), Some(14)));
+            assert!(!s.tokens_estimated);
+            assert_eq!(s.stop_reason.as_deref(), Some("end_turn"));
+            assert_eq!(s.text, "Hi there! How can I help you today?");
+            assert!(s.ttft_ms.is_some());
+        }
+        let single =
+            parse_all(Box::new(AnthropicParser::new(false)), ANTHROPIC_SINGLE, 64).unwrap();
+        assert_eq!(single.model.as_deref(), Some("claude-haiku-5-5"));
+        assert_eq!(
+            (single.prompt_tokens, single.gen_tokens),
+            (Some(13), Some(14))
+        );
+        assert_eq!(single.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(single.text, "Hi there! How can I help you today?");
+        assert_eq!(single.ttft_ms, None);
+    }
 
     #[test]
     fn fixture_lmstudio_messages_stream_and_single() {

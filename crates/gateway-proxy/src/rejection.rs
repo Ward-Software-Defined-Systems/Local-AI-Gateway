@@ -130,6 +130,22 @@ mod tests {
         );
     }
 
+    /// The cloud providers refuse an unknown model with a 404 in their ordinary error shapes.
+    #[test]
+    fn fixture_cloud_error_bodies_summarise_to_their_message() {
+        let anthropic = include_bytes!("../../../fixtures/anthropic/v1-models-404.json");
+        assert_eq!(
+            error_summary(anthropic).as_deref(),
+            Some("model: claude-no-such-model")
+        );
+        let google = include_bytes!("../../../fixtures/gemini/404-bad-model.json");
+        let message = error_summary(google).unwrap();
+        assert!(
+            message.starts_with("models/gemini-no-such-model is not found for API version v1beta"),
+            "{message}"
+        );
+    }
+
     #[test]
     fn fixture_lmstudio_overflow_bodies_are_rejections_without_numbers() {
         // LM Studio 0.4.25 (MLX), a 6000-token prompt into a 2048-token context: 400 on the OpenAI and

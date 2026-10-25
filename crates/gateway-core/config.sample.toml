@@ -59,8 +59,7 @@ listen = []
 upstream = "https://generativelanguage.googleapis.com"
 capture_bodies = true
 record_passthrough = true
-# Off until a capture shows Gemini's OpenAI-compatible endpoint accepts stream_options.
-rewrite_include_usage = false
+rewrite_include_usage = true
 
 [backends.openai]
 enabled = true
