@@ -51,8 +51,8 @@ Errors leave everything as it was.
 
 | Crate | Role |
 |---|---|
-| `gateway-core` | shared types, `config.toml` schema and validation, paths, event bus, aggregation, pricing, the routing table (`routing`), store |
-| `gateway-proxy` | listeners (fixed and unified), classifier (`router`), resolver (`route`), request/response pipelines, parsers, upgrade tunnel, capture, the `RequestScanner` hook |
+| `gateway-core` | shared types, `config.toml` schema and validation, paths, event bus, aggregation, pricing, the routing table (`routing`), the certificate authority (`tls`), store |
+| `gateway-proxy` | listeners (fixed and unified, plain or TLS, every response stamped `x-local-ai-gateway`), classifier (`router`), resolver (`route`), request/response pipelines, parsers, upgrade tunnel, capture, the `RequestScanner` hook |
 | `gateway-dlp` | rules, known-secret matcher, engine (JSON walk, raw scan, allowlist, fingerprints, previews), redaction, policy |
 | `gateway-backends` | LM Studio and Ollama clients and pollers |
 | `gateway-hardware` | sysinfo, ioreg, nvidia-smi, powermetrics |
@@ -283,9 +283,10 @@ part is `data` plus `mime_type`, and a refusal is `{"error":{"message","code"}}`
 - The `cloud_egress` alert kind exists but is unused; cloud requests are counted (status, Security tab) rather
   than alerted per request.
 - The Requests inspector shows the raw captured stream; reply text is reassembled client-side from the
-  OpenAI, Anthropic, Responses and Ollama chunk shapes, so a format the parser does not know shows raw only.
-- `service` and `setup` have been exercised on macOS; the Linux arms are unit-tested (unit text, paths) but
-  not yet run on the Ubuntu box.
+  OpenAI, Anthropic, Responses, Ollama, Gemini and Interactions chunk shapes, so a format the parser does not
+  know shows raw only.
+- `service` and `setup` have been exercised on macOS. The gateway itself has run on the Ubuntu box; the
+  Linux `service` and `setup` arms are unit-tested (unit text, paths) and still await a run by hand there.
 - No format translation: a request reaches a cloud provider in a format it serves or is refused. A
   model-less request with a body and no provider header goes to `default_backend`.
 - The cloud providers are not polled, so they show no reachability, version or model list; the merged

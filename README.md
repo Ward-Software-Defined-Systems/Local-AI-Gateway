@@ -1,7 +1,5 @@
 # WSDS Local AI Gateway
 
-> **Development branch.** You are reading the `unified-router` branch, which adds the unified listener and the Anthropic, Gemini and OpenAI backends described below. It is still under test and may change or be rebased. For a working release use the `main` branch; this notice goes when the branch is merged.
-
 A monitoring, inspection and data-loss-prevention reverse proxy for local LLM servers, with a web dashboard. It sits in front of **LM Studio** and **Ollama**, records every request's tokens, time to first token and throughput, prices them at frontier-API list rates, keeps a searchable copy of each request for debugging, scans prompts and replies for secrets and personal data, alerts you, and shows hardware telemetry, all from one binary. A unified listener routes by model name to those two servers or to **Anthropic**, **Gemini** and **OpenAI**, so the same scanning, recording and cost tracking covers the traffic that really leaves the machine.
 
 It replaces the two terminal monitors it grew out of, [LMS-Monitor](https://github.com/Ward-Software-Defined-Systems/LMS-Monitor) and [Ollama-Monitor](https://github.com/Ward-Software-Defined-Systems/Ollama-Monitor).
@@ -81,7 +79,7 @@ local-ai-gateway service status
 local-ai-gateway setup check                  # configuration, file modes, backends, listeners, tools
 ```
 
-On a headless Linux server run `loginctl enable-linger $USER` once so the user unit outlives your login session. Set `[dashboard] listen = "0.0.0.0:8787"` there; the dashboard then serves HTTPS with a self-signed certificate.
+On a headless Linux server run `loginctl enable-linger $USER` once so the user unit outlives your login session. Set `[dashboard] listen = "0.0.0.0:8787"` there; the dashboard then serves HTTPS with a certificate from the gateway's own certificate authority (see "HTTPS on the listeners" below).
 
 ### Pointing clients at the gateway
 
@@ -147,7 +145,7 @@ Then use `https://` (and `wss://` for the LM Studio SDK) in the client settings 
 | Cloud | Anthropic, Gemini and OpenAI together: feed, rolling metrics, spend per provider at list price and a cumulative spend chart |
 | Requests | the history with filters and search; a request's bodies, headers, timeline, findings and how it was routed |
 | Security | findings and alerts of the last 24 hours, the alert centre, every rule with its effective policy per backend, a test box, the cloud-egress counter |
-| Settings | runtime facts and paths (every listener and what it reaches), the `config.toml` editor (check, save and apply, reload), maintenance |
+| Settings | runtime facts and paths (every listener and what it reaches, the CA fingerprint and certificate names with a download link), the `config.toml` editor (check, save and apply, reload), maintenance |
 
 The status bar shows backend reachability and versions, the live-socket state, unacknowledged alerts, cloud requests and spend in the last 24 hours and the lifetime totals. The feed can be paused (`PAUSED`) and the session metrics reset, as in the terminal monitors.
 
@@ -155,11 +153,13 @@ The status bar shows backend reachability and versions, the live-socket state, u
 
 ![The Ollama tab: the same for Ollama, with cloud models marked and the size and expiry of loaded models](assets/ollama.png)
 
-![The Requests tab: filters, full-text search and the request history with tokens, timing, size and finding counts](assets/requests.png)
+![The Cloud tab: the feed of requests to Anthropic, Gemini and OpenAI with a blocked one, rolling metrics, spend per provider at list price and the time-range charts](assets/cloud.png)
+
+![The Requests tab: filters, full-text search and the request history with prompt and generated tokens, timing, size and finding counts](assets/requests.png)
 
 ![The Security tab: 24-hour summary, alert centre, findings with masked previews, the test box and the rules and policy matrix](assets/security.png)
 
-![The Settings tab: runtime facts and paths, the config.toml editor with check, save-and-apply and reload, and the maintenance actions](assets/settings.png)
+![The Settings tab: runtime facts (listeners, the certificate authority and the names on its certificate) and paths, the config.toml editor with check, save-and-apply and reload, and the maintenance actions](assets/settings.png)
 
 ## Configuration
 
@@ -212,7 +212,7 @@ Every dashboard endpoint is under `/api`, JSON, gated by the token cookie (or `?
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/status` | version, platform, session, listeners, backends, database, DLP summary, paths |
+| `GET /api/status` | version, platform, session, listeners (with their TLS flag), backends, database, DLP summary, paths, the CA fingerprint and certificate names |
 | `GET /api/models?backend=` | the unified model list |
 | `GET /api/hardware/current`, `GET /api/hardware/series?from&to` | telemetry |
 | `GET /api/metrics/rolling`, `/series?metric=`, `/cost`, `/spend?from&to`, `/lifetime` | metrics; `backend=` or `group=local\|cloud` scopes them; `spend` is what each cloud provider charged at list price |
