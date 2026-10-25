@@ -1,6 +1,8 @@
 // Mirrors of the Rust serde shapes in gateway-core and the dashboard API. Kept in step by hand.
 
 export type Backend = 'lmstudio' | 'ollama' | 'anthropic' | 'gemini' | 'openai'
+/** The two families of backends, as the metrics and request APIs scope them. */
+export type BackendGroup = 'local' | 'cloud'
 export type Platform = 'macos' | 'linux' | 'other'
 export type ApiFormat =
   | 'ollama_native'
@@ -203,6 +205,7 @@ export interface DlpStatus {
   findings_24h: number
   blocked_24h: number
   cloud_requests_24h: number
+  cloud_spend_24h_usd: number
 }
 
 export interface PathsStatus {
@@ -243,6 +246,7 @@ export type SeriesMetric =
   | 'tokens_by_model'
   | 'tokens_by_client'
   | 'cost_cumulative'
+  | 'spend_cumulative'
 
 export interface Series {
   metric: SeriesMetric
@@ -265,6 +269,24 @@ export interface CostTable {
   gen_tokens: number
   costs: Record<string, HypotheticalCost>
   columns: string[]
+}
+
+/** What one cloud provider was asked and charged at list price over a window. */
+export interface SpendRow {
+  backend: Backend
+  requests: number
+  prompt_tokens: number
+  gen_tokens: number
+  spend_usd: number
+  /** Completed requests whose model has no rate in the pricing table. */
+  unpriced: number
+}
+
+export interface Spend {
+  from: string
+  to: string
+  rows: SpendRow[]
+  total_usd: number
 }
 
 export interface Lifetime {

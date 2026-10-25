@@ -9,9 +9,9 @@ use super::read::{self, FindingFilter, RequestFilter, SeriesMetric, SeriesQuery}
 use super::retention::RetentionPolicy;
 use super::{open, open_writer_connection, rows, temp_db_path};
 use crate::types::{
-    Alert, AlertKind, ApiFormat, Backend, Body, Direction, DlpAction, FailureSource, Finding,
-    FindingCategory, HardwareSample, ModelInfo, ModelState, Outcome, ProcStats, RequestKind,
-    RequestRecord, Severity,
+    Alert, AlertKind, ApiFormat, Backend, BackendGroup, Body, Direction, DlpAction, FailureSource,
+    Finding, FindingCategory, HardwareSample, ModelInfo, ModelState, Outcome, ProcStats,
+    RequestKind, RequestRecord, Severity,
 };
 
 const PROMPT: &str = r#"{"messages":[{"role":"user","content":"my key is AKIAIOSFODNN7EXAMPLE"}]}"#;
@@ -70,6 +70,125 @@ fn record(
         actual_cost_usd: None,
         routed_by: None,
     }
+}
+
+#[tokio::test]
+async fn cloud_spend_and_group_scopes_separate_the_providers_from_the_local_servers() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(&temp_db_path(&dir)).await.unwrap();
+    let session = store.writer.start_session("0.1.0-test").await.unwrap();
+    let mut priced = record(
+        session,
+        Backend::Anthropic,
+        ApiFormat::AnthropicMessages,
+        Outcome::Completed,
+        10,
+    );
+    priced.is_cloud = true;
+    priced.actual_cost_usd = Some(0.25);
+    let mut unpriced = record(
+        session,
+        Backend::Anthropic,
+        ApiFormat::AnthropicMessages,
+        Outcome::Completed,
+        20,
+    );
+    unpriced.is_cloud = true;
+    let mut gemini = record(
+        session,
+        Backend::Gemini,
+        ApiFormat::GeminiGenerate,
+        Outcome::Completed,
+        30,
+    );
+    gemini.is_cloud = true;
+    gemini.actual_cost_usd = Some(1.5);
+    let mut gemini_failed = record(
+        session,
+        Backend::Gemini,
+        ApiFormat::GeminiGenerate,
+        Outcome::Failed {
+            status: 429,
+            source: FailureSource::Upstream,
+        },
+        40,
+    );
+    gemini_failed.is_cloud = true;
+    let local = record(
+        session,
+        Backend::Ollama,
+        ApiFormat::OllamaNative,
+        Outcome::Completed,
+        50,
+    );
+    for rec in [&priced, &unpriced, &gemini, &gemini_failed, &local] {
+        store
+            .writer
+            .persist_request(rec.clone(), Vec::new(), Vec::new())
+            .await
+            .unwrap();
+    }
+    let from = Utc::now() - Duration::hours(1);
+    let to = Utc::now() + Duration::hours(1);
+    let spend = store
+        .reads
+        .run(move |c| read::cloud_spend(c, from, to))
+        .await
+        .unwrap();
+    assert_eq!(spend.len(), 2, "{spend:?}");
+    let anthropic = &spend[0];
+    assert_eq!(anthropic.backend, Backend::Anthropic);
+    assert_eq!(anthropic.requests, 2);
+    assert_eq!(anthropic.unpriced, 1);
+    assert_eq!(anthropic.spend_usd, 0.25);
+    assert_eq!(anthropic.prompt_tokens, 22);
+    let gemini_row = &spend[1];
+    assert_eq!(gemini_row.backend, Backend::Gemini);
+    assert_eq!(gemini_row.requests, 1, "failed requests do not count");
+    assert_eq!(gemini_row.spend_usd, 1.5);
+
+    let (cloud_prompt, _) = store
+        .reads
+        .run(move |c| read::token_totals(c, from, to, None, Some(BackendGroup::Cloud)))
+        .await
+        .unwrap();
+    assert_eq!(
+        cloud_prompt, 33,
+        "three completed cloud requests at 11 prompt tokens"
+    );
+    let (local_prompt, _) = store
+        .reads
+        .run(move |c| read::token_totals(c, from, to, None, Some(BackendGroup::Local)))
+        .await
+        .unwrap();
+    assert_eq!(local_prompt, 11);
+    let page = store
+        .reads
+        .run(|c| {
+            read::list_requests(
+                c,
+                &RequestFilter {
+                    group: Some(BackendGroup::Cloud),
+                    limit: 10,
+                    ..RequestFilter::default()
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 4);
+    assert!(
+        page.items
+            .iter()
+            .all(|r| r.record.backend.is_cloud_provider())
+    );
+    let activity = store
+        .reads
+        .run(move |c| read::activity_since(c, from))
+        .await
+        .unwrap();
+    assert_eq!(activity.cloud_requests, 4);
+    assert_eq!(activity.cloud_spend_usd, 1.75);
 }
 
 #[tokio::test]
@@ -530,6 +649,7 @@ async fn writes_are_durable_and_readable() {
                 to: Utc::now() + Duration::hours(1),
                 bucket_ms: 3_600_000,
                 backend: None,
+                group: None,
                 model: None,
             };
             Ok(read::aggregate_series(&read::series_rows(c, &q)?, &q))
@@ -547,6 +667,7 @@ async fn writes_are_durable_and_readable() {
                 c,
                 Utc::now() - Duration::hours(1),
                 Utc::now() + Duration::hours(1),
+                None,
                 None,
             )
         })

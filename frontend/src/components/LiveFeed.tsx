@@ -9,7 +9,8 @@ interface Props {
   inflight: InflightRequest[]
   models: ModelInfo[]
   showBackend?: boolean
-  backend?: Backend
+  /** Which backends' in-flight requests belong in this view; everything when absent. */
+  include?: (backend: Backend) => boolean
 }
 
 /** LM Studio's rule: the reply filled the context when the stop says so, or hit the token cap at the loaded length. */
@@ -37,13 +38,13 @@ function outcomeText(record: RequestRecord): string {
   }
 }
 
-export default function LiveFeed({ rows, inflight, models, showBackend = false, backend }: Props) {
+export default function LiveFeed({ rows, inflight, models, showBackend = false, include }: Props) {
   const paused = useLive((s) => s.paused)
   const skipped = useLive((s) => s.skippedWhilePaused)
   const togglePause = useLive((s) => s.togglePause)
   const resetFeed = useLive((s) => s.resetFeed)
   const visibleInflight = inflight
-    .filter((r) => r.api_format !== 'passthrough' && r.kind === 'http' && (backend === undefined || r.backend === backend))
+    .filter((r) => r.api_format !== 'passthrough' && r.api_format !== 'cloud_passthrough' && r.kind === 'http' && (include === undefined || include(r.backend)))
     .sort((a, b) => (a.started_at < b.started_at ? 1 : -1))
   return (
     <div>

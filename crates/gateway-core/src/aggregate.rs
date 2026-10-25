@@ -118,11 +118,16 @@ impl Aggregator {
 
     /// Every window over one backend's records, or all of them.
     pub fn snapshot_for(&self, backend: Option<Backend>, now: DateTime<Utc>) -> RollingMetrics {
-        let samples: Vec<&Sample> = self
-            .samples
-            .iter()
-            .filter(|s| backend.is_none_or(|b| s.backend == b))
-            .collect();
+        self.snapshot_where(|b| backend.is_none_or(|want| b == want), now)
+    }
+
+    /// Every window over the records of the backends `keep` accepts.
+    pub fn snapshot_where(
+        &self,
+        keep: impl Fn(Backend) -> bool,
+        now: DateTime<Utc>,
+    ) -> RollingMetrics {
+        let samples: Vec<&Sample> = self.samples.iter().filter(|s| keep(s.backend)).collect();
         let since = |secs: i64| {
             let cutoff = now - Duration::seconds(secs);
             window(

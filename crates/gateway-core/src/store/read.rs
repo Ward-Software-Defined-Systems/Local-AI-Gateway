@@ -18,8 +18,19 @@ use uuid::Uuid;
 use super::rows::{self, from_ms, ms};
 use super::schema;
 use crate::types::{
-    Alert, Backend, Body, Direction, Finding, LifetimeTotals, RequestRecord, Session, Severity,
+    Alert, Backend, BackendGroup, Body, Direction, Finding, LifetimeTotals, RequestRecord, Session,
+    Severity,
 };
+
+/// The quoted backend ids of a group, for an SQL `IN (...)`; the ids are compile-time constants.
+fn backend_in_list(group: BackendGroup) -> String {
+    group
+        .backends()
+        .iter()
+        .map(|b| format!("'{}'", b.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 pub const DEFAULT_POOL_SIZE: usize = 4;
 
@@ -126,6 +137,8 @@ pub fn list_sessions(conn: &Connection, limit: usize) -> Result<Vec<Session>> {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct RequestFilter {
     pub backend: Option<Backend>,
+    /// Only the local servers, or only the cloud providers.
+    pub group: Option<BackendGroup>,
     pub model: Option<String>,
     /// An `Outcome::as_str` value.
     pub outcome: Option<String>,
@@ -255,6 +268,9 @@ pub fn list_requests(conn: &Connection, filter: &RequestFilter) -> Result<Reques
     ));
     if let Some(backend) = filter.backend {
         q.and("r.backend = ?", backend.as_str());
+    }
+    if let Some(group) = filter.group {
+        q.raw(&format!(" AND r.backend IN ({})", backend_in_list(group)));
     }
     if let Some(model) = &filter.model {
         q.and(
@@ -586,6 +602,9 @@ pub enum SeriesMetric {
     TokensByClient,
     /// Cumulative hypothetical cost per frontier key, running across buckets.
     CostCumulative,
+    /// Cumulative real spend per cloud provider (completed requests with a priced model), running across
+    /// buckets.
+    SpendCumulative,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -595,6 +614,7 @@ pub struct SeriesQuery {
     pub to: DateTime<Utc>,
     pub bucket_ms: i64,
     pub backend: Option<Backend>,
+    pub group: Option<BackendGroup>,
     pub model: Option<String>,
 }
 
@@ -609,6 +629,7 @@ pub struct SeriesPoint {
 #[derive(Debug, Clone)]
 pub struct SeriesRow {
     pub started_at: i64,
+    pub backend: String,
     pub model: String,
     pub client: String,
     pub completed: bool,
@@ -617,12 +638,13 @@ pub struct SeriesRow {
     pub tokens_per_sec: Option<f64>,
     pub ttft_ms: Option<f64>,
     pub cost: BTreeMap<String, f64>,
+    pub actual_cost_usd: Option<f64>,
 }
 
 pub fn series_rows(conn: &Connection, query: &SeriesQuery) -> Result<Vec<SeriesRow>> {
     let mut sql = String::from(
         "SELECT started_at, COALESCE(model_resolved, model_requested, '?'), client_ip, outcome, COALESCE(prompt_tokens, 0), \
-         COALESCE(gen_tokens, 0), tokens_per_sec, ttft_ms, hypothetical_cost \
+         COALESCE(gen_tokens, 0), tokens_per_sec, ttft_ms, hypothetical_cost, backend, actual_cost_usd \
          FROM request_records WHERE kind = 'http' AND api_format NOT IN ('passthrough', 'cloud_passthrough') \
          AND started_at >= ?1 AND started_at < ?2",
     );
@@ -630,6 +652,9 @@ pub fn series_rows(conn: &Connection, query: &SeriesQuery) -> Result<Vec<SeriesR
     if let Some(backend) = query.backend {
         args.push(Box::new(backend.as_str()));
         sql.push_str(&format!(" AND backend = ?{}", args.len()));
+    }
+    if let Some(group) = query.group {
+        sql.push_str(&format!(" AND backend IN ({})", backend_in_list(group)));
     }
     if let Some(model) = &query.model {
         args.push(Box::new(model.clone()));
@@ -646,6 +671,7 @@ pub fn series_rows(conn: &Connection, query: &SeriesQuery) -> Result<Vec<SeriesR
             let cost: Option<String> = r.get(8)?;
             Ok(SeriesRow {
                 started_at: r.get(0)?,
+                backend: r.get(9)?,
                 model: r.get(1)?,
                 client: r.get(2)?,
                 completed: outcome == "completed",
@@ -656,6 +682,7 @@ pub fn series_rows(conn: &Connection, query: &SeriesQuery) -> Result<Vec<SeriesR
                 cost: cost
                     .and_then(|c| serde_json::from_str(&c).ok())
                     .unwrap_or_default(),
+                actual_cost_usd: r.get(10)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -735,6 +762,14 @@ pub fn aggregate_series(rows: &[SeriesRow], query: &SeriesQuery) -> Vec<SeriesPo
                     }
                     values = running.clone();
                 }
+                SeriesMetric::SpendCumulative => {
+                    for r in &rows {
+                        if let Some(usd) = r.actual_cost_usd.filter(|_| r.completed) {
+                            *running.entry(r.backend.clone()).or_insert(0.0) += usd;
+                        }
+                    }
+                    values = running.clone();
+                }
             }
             SeriesPoint {
                 t: from_ms(bucket),
@@ -758,6 +793,7 @@ pub fn token_totals(
     from: DateTime<Utc>,
     to: DateTime<Utc>,
     backend: Option<Backend>,
+    group: Option<BackendGroup>,
 ) -> Result<(u64, u64)> {
     let mut sql = String::from(
         "SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(gen_tokens), 0) FROM request_records \
@@ -769,10 +805,68 @@ pub fn token_totals(
         args.push(Box::new(backend.as_str()));
         sql.push_str(" AND backend = ?3");
     }
+    if let Some(group) = group {
+        sql.push_str(&format!(" AND backend IN ({})", backend_in_list(group)));
+    }
     conn.query_row(&sql, params_from_iter(args.iter()), |r| {
         Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
     })
     .context("token totals")
+}
+
+/// What one cloud provider was asked and charged over a range: completed inference requests only.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SpendRow {
+    pub backend: Backend,
+    pub requests: u64,
+    pub prompt_tokens: u64,
+    pub gen_tokens: u64,
+    /// At the provider's list price, flat rates; `unpriced` requests contribute nothing.
+    pub spend_usd: f64,
+    /// Completed requests whose model has no rate in the pricing table.
+    pub unpriced: u64,
+}
+
+pub fn cloud_spend(
+    conn: &Connection,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<SpendRow>> {
+    let sql = format!(
+        "SELECT backend, COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(gen_tokens), 0), \
+         COALESCE(SUM(actual_cost_usd), 0.0), SUM(CASE WHEN actual_cost_usd IS NULL THEN 1 ELSE 0 END) \
+         FROM request_records WHERE kind = 'http' AND api_format NOT IN ('passthrough', 'cloud_passthrough') \
+         AND outcome = 'completed' AND backend IN ({}) AND started_at >= ?1 AND started_at < ?2 \
+         GROUP BY backend ORDER BY backend",
+        backend_in_list(BackendGroup::Cloud)
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt
+        .query_map(params![ms(from), ms(to)], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, f64>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("cloud spend")?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(backend, requests, prompt, generated, usd, unpriced)| {
+            Some(SpendRow {
+                backend: backend.parse().ok()?,
+                requests: requests.max(0) as u64,
+                prompt_tokens: prompt.max(0) as u64,
+                gen_tokens: generated.max(0) as u64,
+                spend_usd: usd,
+                unpriced: unpriced.max(0) as u64,
+            })
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -856,11 +950,13 @@ pub fn body_count(conn: &Connection) -> Result<u64> {
 
 /// Counts for the Security tab's summary tiles: findings, blocked requests and requests whose prompt left
 /// the machine (cloud-routed inference and scanned cloud passthrough) since `since`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub struct ActivitySummary {
     pub findings: u64,
     pub blocked_requests: u64,
     pub cloud_requests: u64,
+    /// What the cloud providers charged at list price, over the same window.
+    pub cloud_spend_usd: f64,
 }
 
 pub fn activity_since(conn: &Connection, since: DateTime<Utc>) -> Result<ActivitySummary> {
@@ -881,10 +977,17 @@ pub fn activity_since(conn: &Connection, since: DateTime<Utc>) -> Result<Activit
         [since_ms],
         |r| r.get(0),
     )?;
+    let spend: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(actual_cost_usd), 0.0) FROM request_records WHERE actual_cost_usd IS NOT NULL \
+         AND started_at >= ?1",
+        [since_ms],
+        |r| r.get(0),
+    )?;
     Ok(ActivitySummary {
         findings: findings.max(0) as u64,
         blocked_requests: blocked.max(0) as u64,
         cloud_requests: cloud.max(0) as u64,
+        cloud_spend_usd: spend,
     })
 }
 
@@ -926,6 +1029,7 @@ mod tests {
     ) -> SeriesRow {
         SeriesRow {
             started_at: at_ms,
+            backend: if model == "a" { "anthropic" } else { "ollama" }.into(),
             model: model.into(),
             client: client.into(),
             completed,
@@ -934,6 +1038,7 @@ mod tests {
             tokens_per_sec: tps,
             ttft_ms: ttft,
             cost: BTreeMap::from([("k".to_string(), cost)]),
+            actual_cost_usd: (model == "a").then_some(cost * 10.0),
         }
     }
 
@@ -944,6 +1049,7 @@ mod tests {
             to: from_ms(10_000_000),
             bucket_ms: 60_000,
             backend: None,
+            group: None,
             model: None,
         }
     }
@@ -981,5 +1087,16 @@ mod tests {
         let cost = aggregate_series(&rows, &query(SeriesMetric::CostCumulative));
         assert_eq!(cost[0].values["k"], 3.0);
         assert_eq!(cost[1].values["k"], 7.0, "cumulative across buckets");
+
+        let spend = aggregate_series(&rows, &query(SeriesMetric::SpendCumulative));
+        assert_eq!(
+            spend[0].values["anthropic"], 10.0,
+            "only completed rows with a real cost"
+        );
+        assert_eq!(spend[0].values.get("ollama"), None);
+        assert_eq!(
+            spend[1].values["anthropic"], 50.0,
+            "cumulative across buckets"
+        );
     }
 }

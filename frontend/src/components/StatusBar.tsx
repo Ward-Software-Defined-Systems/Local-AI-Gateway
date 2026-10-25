@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router'
 import { useLifetime, useStatus } from '../api/hooks'
 import { BACKEND_NAMES, type Backend } from '../api/types'
-import { formatClock, formatInt } from '../lib/format'
+import { formatClock, formatInt, formatUsd } from '../lib/format'
 import { useLive } from '../store/live'
 
 const PILL: Record<string, string> = {
@@ -72,10 +72,15 @@ export default function StatusBar() {
       >
         alerts {status.data ? formatInt(status.data.unacked_alerts) : '-'}
       </NavLink>
-      {status.data && status.data.dlp.cloud_requests_24h > 0 && (
-        <span className="text-xs ink-cloud" title="inference requests routed to a cloud model in the last 24 hours">
+      {status.data && (status.data.dlp.cloud_requests_24h > 0 || status.data.dlp.cloud_spend_24h_usd > 0) && (
+        <NavLink
+          to="/cloud"
+          className="text-xs ink-cloud"
+          title="requests whose prompt left the machine in the last 24 hours, and what the cloud providers charged at list price"
+        >
           ☁ {formatInt(status.data.dlp.cloud_requests_24h)} cloud / 24h
-        </span>
+          {status.data.dlp.cloud_spend_24h_usd > 0 ? ` · ${formatUsd(status.data.dlp.cloud_spend_24h_usd)}` : ''}
+        </NavLink>
       )}
       {restartRequired.length > 0 && (
         <NavLink to="/settings" className="rounded bg-amber-500/15 px-1.5 py-0.5 text-xs text-amber-300" title={restartRequired.join(', ')}>

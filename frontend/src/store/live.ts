@@ -40,7 +40,7 @@ interface LiveState {
 }
 
 function isFeedRow(record: RequestRecord): boolean {
-  return record.kind === 'http' && record.api_format !== 'passthrough'
+  return record.kind === 'http' && record.api_format !== 'passthrough' && record.api_format !== 'cloud_passthrough'
 }
 
 export const useLive = create<LiveState>()((set) => ({

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useCost, useHardwareSeries, useModels, useRecentRequests, useRolling, useSeries, useStatus } from '../api/hooks'
-import type { Backend } from '../api/types'
+import { useCost, useHardwareSeries, useModels, useRecentRequests, useRolling, useSeries, useSpend, useStatus, type Scope } from '../api/hooks'
+import { BACKEND_NAMES, CLOUD_BACKENDS, LOCAL_BACKENDS, type Backend } from '../api/types'
 import { SERIES, STATUS } from '../lib/colours'
 import { formatCompact, formatMs, formatTps, formatUsd } from '../lib/format'
 import { rangeFrom, useRange } from '../lib/range'
@@ -11,6 +11,7 @@ import LiveFeed from './LiveFeed'
 import ModelsTable from './ModelsTable'
 import Panel from './Panel'
 import RollingMetrics from './RollingMetrics'
+import SpendTable from './SpendTable'
 import Toolbar from './Toolbar'
 import HardwareCharts from './charts/HardwareCharts'
 import LineSeriesChart from './charts/LineSeriesChart'
@@ -26,8 +27,18 @@ function useMinuteTick(): number {
   return tick
 }
 
-/** The Overview (no backend) and the per-backend tabs share this composition. */
-export default function MonitorView({ backend }: { backend?: Backend }) {
+/** One fixed colour per provider, so a provider keeps its colour whatever else is on the chart. */
+const PROVIDER_COLOURS: Record<string, string> = { anthropic: SERIES[0], gemini: SERIES[1], openai: SERIES[2] }
+
+/** The Overview (no scope), the per-backend tabs and the Cloud tab share this composition. */
+export default function MonitorView({ scope }: { scope?: Scope }) {
+  const backend = scope?.backend
+  const group = scope?.group
+  const cloud = group === 'cloud'
+  const include = useMemo(
+    () => (b: Backend) => (backend ? b === backend : group ? (group === 'cloud' ? CLOUD_BACKENDS : LOCAL_BACKENDS).includes(b) : true),
+    [backend, group],
+  )
   const status = useStatus()
   const platform = status.data?.platform
   const feed = useLive((s) => s.feed)
@@ -42,53 +53,67 @@ export default function MonitorView({ backend }: { backend?: Backend }) {
   }, [recent.data, seedFeed])
 
   const models = useModels(backend)
-  const rollingQuery = useRolling(backend)
-  const rolling = backend ? rollingQuery.data : liveRolling ?? rollingQuery.data
+  const rollingQuery = useRolling(scope)
+  const rolling = scope ? rollingQuery.data : liveRolling ?? rollingQuery.data
   const sessionStart = rolling?.session_started_at ?? status.data?.started_at
-  const cost = useCost(sessionStart, backend)
+  const cost = useCost(cloud ? undefined : sessionStart, scope)
+  const spend = useSpend(cloud ? sessionStart : undefined)
 
   const rangeKey = useRange((s) => s.key)
   const tick = useMinuteTick()
   const from = useMemo(() => rangeFrom(rangeKey), [rangeKey, tick])
-  const req = useSeries('req_per_min', from, backend)
-  const tps = useSeries('tok_per_sec', from, backend)
-  const ttft = useSeries('ttft', from, backend)
-  const byModel = useSeries('tokens_by_model', from, backend)
-  const costCumulative = useSeries('cost_cumulative', from, backend)
+  const req = useSeries('req_per_min', from, scope)
+  const tps = useSeries('tok_per_sec', from, scope)
+  const ttft = useSeries('ttft', from, scope)
+  const byModel = useSeries('tokens_by_model', from, scope)
+  const cumulative = useSeries(cloud ? 'spend_cumulative' : 'cost_cumulative', from, scope)
   const hardwareSeries = useHardwareSeries(from)
 
-  const rows = useMemo(() => (backend ? feed.filter((r) => r.backend === backend) : feed), [feed, backend])
+  const rows = useMemo(() => feed.filter((r) => include(r.backend)), [feed, include])
   const inflight = useMemo(() => Object.values(inflightMap), [inflightMap])
-  const costKeys = useMemo(() => {
+  const cumulativeLines = useMemo(() => {
+    if (cloud) return CLOUD_BACKENDS.map((b) => ({ key: b, label: BACKEND_NAMES[b], color: PROVIDER_COLOURS[b] }))
     const keys = new Set<string>()
-    for (const p of costCumulative.data?.points ?? []) for (const k of Object.keys(p.values)) keys.add(k)
+    for (const p of cumulative.data?.points ?? []) for (const k of Object.keys(p.values)) keys.add(k)
     const order = cost.data?.columns ?? []
-    return [...keys].sort((a, b) => (order.indexOf(a) === -1 ? 99 : order.indexOf(a)) - (order.indexOf(b) === -1 ? 99 : order.indexOf(b)))
-  }, [costCumulative.data, cost.data])
+    return [...keys]
+      .sort((a, b) => (order.indexOf(a) === -1 ? 99 : order.indexOf(a)) - (order.indexOf(b) === -1 ? 99 : order.indexOf(b)))
+      .map((k, i) => ({ key: k, label: k, color: SERIES[i % SERIES.length] }))
+  }, [cloud, cumulative.data, cost.data])
 
   return (
     <div className="space-y-4">
       <div className="grid gap-4 xl:grid-cols-3">
         <div className="xl:col-span-2">
           <Panel title={`live request feed (${rows.length}/200)`}>
-            <LiveFeed rows={rows} inflight={inflight} models={models.data ?? []} showBackend={!backend} backend={backend} />
+            <LiveFeed rows={rows} inflight={inflight} models={models.data ?? []} showBackend={!backend} include={include} />
           </Panel>
         </div>
         <div className="space-y-4">
           <Panel title="rolling metrics">
             <RollingMetrics metrics={rolling} />
           </Panel>
-          <Panel title="hypothetical session cost">
-            <CostTable cost={cost.data} />
-          </Panel>
+          {cloud ? (
+            <Panel title="spend at list price (session)">
+              <SpendTable spend={spend.data} />
+            </Panel>
+          ) : (
+            <Panel title="hypothetical session cost">
+              <CostTable cost={cost.data} />
+            </Panel>
+          )}
         </div>
       </div>
-      <Panel title="hardware">
-        <HardwareLine sample={hardware} platform={platform} backend={backend} />
-      </Panel>
-      <Panel title={backend ? 'models' : 'models (both backends)'}>
-        <ModelsTable models={models.data ?? []} showBackend={!backend} lastModel={lastModel} />
-      </Panel>
+      {!cloud && (
+        <Panel title="hardware">
+          <HardwareLine sample={hardware} platform={platform} backend={backend} />
+        </Panel>
+      )}
+      {!cloud && (
+        <Panel title={backend ? 'models' : 'models (local backends)'}>
+          <ModelsTable models={models.data ?? []} showBackend={!backend} lastModel={lastModel} />
+        </Panel>
+      )}
       <Toolbar />
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         <LineSeriesChart
@@ -124,15 +149,15 @@ export default function MonitorView({ backend }: { backend?: Backend }) {
         <StackedTokensChart title="tokens by model" series={byModel.data} loading={byModel.isFetching} />
         <div className="md:col-span-2">
           <LineSeriesChart
-            title="cumulative hypothetical cost"
-            series={costCumulative.data}
-            loading={costCumulative.isFetching}
+            title={cloud ? 'cumulative spend by provider' : 'cumulative hypothetical cost'}
+            series={cumulative.data}
+            loading={cumulative.isFetching}
             format={formatUsd}
-            lines={costKeys.map((k, i) => ({ key: k, label: k, color: SERIES[i % SERIES.length] }))}
+            lines={cumulativeLines}
           />
         </div>
       </div>
-      <HardwareCharts points={hardwareSeries.data} loading={hardwareSeries.isFetching} gpuMemLabel={platform === 'linux' ? 'VRAM used' : 'GPU memory in use'} />
+      {!cloud && <HardwareCharts points={hardwareSeries.data} loading={hardwareSeries.isFetching} gpuMemLabel={platform === 'linux' ? 'VRAM used' : 'GPU memory in use'} />}
     </div>
   )
 }

@@ -175,6 +175,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/metrics/rolling", get(api::metrics::api_rolling))
         .route("/api/metrics/series", get(api::metrics::api_series))
         .route("/api/metrics/cost", get(api::metrics::api_cost))
+        .route("/api/metrics/spend", get(api::metrics::api_spend))
         .route("/api/metrics/lifetime", get(api::metrics::api_lifetime))
         .route("/api/requests", get(api::requests::api_list))
         .route("/api/requests/inflight", get(api::requests::api_inflight))

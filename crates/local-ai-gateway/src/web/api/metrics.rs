@@ -6,16 +6,22 @@ use axum::extract::{Query, State};
 use chrono::{DateTime, Duration, Utc};
 use gateway_core::aggregate::RollingMetrics;
 use gateway_core::pricing::HypotheticalCost;
-use gateway_core::store::read::{self, SeriesMetric, SeriesPoint};
-use gateway_core::types::{Backend, LifetimeTotals};
+use gateway_core::store::read::{self, SeriesMetric, SeriesPoint, SpendRow};
+use gateway_core::types::{Backend, BackendGroup, LifetimeTotals};
 use serde::{Deserialize, Serialize};
 
 use super::{ApiError, ApiResult, default_bucket_ms, ok, store, window};
 use crate::web::AppState;
 
+/// Whether a backend is inside a `backend=` / `group=` scope; both absent means everything.
+fn in_scope(backend: Option<Backend>, group: Option<BackendGroup>, candidate: Backend) -> bool {
+    backend.is_none_or(|want| candidate == want) && group.is_none_or(|g| g.contains(candidate))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RollingQuery {
     pub backend: Option<Backend>,
+    pub group: Option<BackendGroup>,
 }
 
 pub async fn api_rolling(
@@ -25,7 +31,7 @@ pub async fn api_rolling(
     let snapshot = st
         .aggregator()
         .lock()
-        .map(|agg| agg.snapshot_for(q.backend, Utc::now()))
+        .map(|agg| agg.snapshot_where(|b| in_scope(q.backend, q.group, b), Utc::now()))
         .map_err(|_| ApiError::internal(anyhow::anyhow!("aggregator poisoned")))?;
     ok(snapshot)
 }
@@ -37,6 +43,7 @@ pub struct SeriesQuery {
     pub to: Option<DateTime<Utc>>,
     pub bucket_s: Option<i64>,
     pub backend: Option<Backend>,
+    pub group: Option<BackendGroup>,
     pub model: Option<String>,
 }
 
@@ -65,6 +72,7 @@ pub async fn api_series(
         to,
         bucket_ms,
         backend: q.backend,
+        group: q.group,
         model: q.model,
     };
     let points = store
@@ -89,6 +97,7 @@ pub struct CostQuery {
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
     pub backend: Option<Backend>,
+    pub group: Option<BackendGroup>,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,10 +117,10 @@ pub async fn api_cost(
 ) -> ApiResult<CostTable> {
     let store = store(&st)?;
     let (from, to) = window(q.from, q.to, Duration::hours(24))?;
-    let backend = q.backend;
+    let (backend, group) = (q.backend, q.group);
     let (prompt_tokens, gen_tokens) = store
         .reads
-        .run(move |c| read::token_totals(c, from, to, backend))
+        .run(move |c| read::token_totals(c, from, to, backend, group))
         .await
         .map_err(ApiError::internal)?;
     ok(CostTable {
@@ -121,6 +130,41 @@ pub async fn api_cost(
         gen_tokens,
         costs: st.pricing().costs(prompt_tokens, gen_tokens),
         columns: gateway_core::pricing::FRONTIER_MODELS.to_vec(),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SpendQuery {
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+}
+
+/// What the cloud providers charged at list price over a window, per provider.
+#[derive(Debug, Serialize)]
+pub struct Spend {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub rows: Vec<SpendRow>,
+    pub total_usd: f64,
+}
+
+pub async fn api_spend(
+    State(st): State<AppState>,
+    Query(q): Query<SpendQuery>,
+) -> ApiResult<Spend> {
+    let store = store(&st)?;
+    let (from, to) = window(q.from, q.to, Duration::hours(24))?;
+    let rows = store
+        .reads
+        .run(move |c| read::cloud_spend(c, from, to))
+        .await
+        .map_err(ApiError::internal)?;
+    let total_usd = rows.iter().map(|r| r.spend_usd).sum();
+    ok(Spend {
+        from,
+        to,
+        rows,
+        total_usd,
     })
 }
 

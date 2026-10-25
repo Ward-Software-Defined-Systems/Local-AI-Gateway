@@ -53,6 +53,8 @@ pub struct DlpStatus {
     pub findings_24h: u64,
     pub blocked_24h: u64,
     pub cloud_requests_24h: u64,
+    /// What the cloud providers charged at list price in the last 24 hours.
+    pub cloud_spend_24h_usd: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -187,6 +189,7 @@ pub async fn api_status(State(st): State<AppState>) -> ApiResult<Status> {
             findings_24h: activity.findings,
             blocked_24h: activity.blocked_requests,
             cloud_requests_24h: activity.cloud_requests,
+            cloud_spend_24h_usd: activity.cloud_spend_usd,
         },
         paths: PathsStatus {
             data_dir: paths.data_dir.display().to_string(),

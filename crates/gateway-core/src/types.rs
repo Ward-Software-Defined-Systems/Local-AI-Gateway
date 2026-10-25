@@ -98,6 +98,27 @@ impl FromStr for Backend {
     }
 }
 
+/// The two families of backends, as dashboard scopes name them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendGroup {
+    Local,
+    Cloud,
+}
+
+impl BackendGroup {
+    pub fn backends(self) -> &'static [Backend] {
+        match self {
+            BackendGroup::Local => &Backend::LOCAL,
+            BackendGroup::Cloud => &Backend::CLOUD_PROVIDERS,
+        }
+    }
+
+    pub fn contains(self, backend: Backend) -> bool {
+        self.backends().contains(&backend)
+    }
+}
+
 /// Severity of a DLP finding or an alert. The derived order is `Low < Medium < High < Critical`, which
 /// is what `min_severity` thresholds compare against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -203,6 +224,21 @@ mod tests {
                 backend
             );
         }
+    }
+
+    #[test]
+    fn backend_groups_name_the_two_families() {
+        assert!(BackendGroup::Local.contains(Backend::Ollama));
+        assert!(!BackendGroup::Local.contains(Backend::Gemini));
+        assert!(BackendGroup::Cloud.contains(Backend::Gemini));
+        assert_eq!(
+            serde_json::from_str::<BackendGroup>("\"cloud\"").unwrap(),
+            BackendGroup::Cloud
+        );
+        assert_eq!(
+            BackendGroup::Local.backends().len() + BackendGroup::Cloud.backends().len(),
+            Backend::ALL.len()
+        );
     }
 
     #[test]

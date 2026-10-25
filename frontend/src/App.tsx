@@ -1,6 +1,7 @@
 import { NavLink, Route, Routes } from 'react-router'
 import StatusBar from './components/StatusBar'
 import BackendPage from './pages/BackendPage'
+import CloudPage from './pages/CloudPage'
 import Overview from './pages/Overview'
 import Requests from './pages/Requests'
 import Security from './pages/Security'
@@ -11,6 +12,7 @@ const TABS = [
   { to: '/', label: 'Overview', end: true },
   { to: '/lmstudio', label: 'LM Studio' },
   { to: '/ollama', label: 'Ollama' },
+  { to: '/cloud', label: 'Cloud' },
   { to: '/requests', label: 'Requests' },
   { to: '/security', label: 'Security' },
   { to: '/settings', label: 'Settings' },
@@ -47,6 +49,7 @@ export default function App() {
           <Route path="/" element={<Overview />} />
           <Route path="/lmstudio" element={<BackendPage backend="lmstudio" />} />
           <Route path="/ollama" element={<BackendPage backend="ollama" />} />
+          <Route path="/cloud" element={<CloudPage />} />
           <Route path="/requests/*" element={<Requests />} />
           <Route path="/security/*" element={<Security />} />
           <Route path="/settings" element={<Settings />} />

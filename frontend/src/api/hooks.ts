@@ -4,6 +4,7 @@ import type {
   AlertsPage,
   ApplyReport,
   Backend,
+  BackendGroup,
   ConfigCheck,
   ConfigFile,
   CostTable,
@@ -19,6 +20,7 @@ import type {
   RollingMetrics,
   Series,
   SeriesMetric,
+  Spend,
   Status,
 } from './types'
 
@@ -28,6 +30,15 @@ function qs(params: Record<string, string | number | boolean | undefined | null>
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
   return parts.length ? `?${parts.join('&')}` : ''
 }
+
+/** What a metrics or request query is scoped to: one backend, one family of backends, or everything. */
+export interface Scope {
+  backend?: Backend
+  group?: BackendGroup
+}
+
+const scopeParams = (scope?: Scope) => ({ backend: scope?.backend, group: scope?.group })
+const scopeKey = (scope?: Scope) => `${scope?.backend ?? 'all'}|${scope?.group ?? 'all'}`
 
 export function useStatus() {
   return useQuery({
@@ -47,11 +58,11 @@ export function useModels(backend?: Backend) {
   })
 }
 
-/** Rolling windows for one backend come from REST; the all-backends snapshot also arrives over the socket. */
-export function useRolling(backend?: Backend) {
+/** Rolling windows for a scope come from REST; the all-backends snapshot also arrives over the socket. */
+export function useRolling(scope?: Scope) {
   return useQuery({
-    queryKey: ['rolling', backend ?? 'all'],
-    queryFn: () => apiGet<RollingMetrics>(`/api/metrics/rolling${qs({ backend })}`),
+    queryKey: ['rolling', scopeKey(scope)],
+    queryFn: () => apiGet<RollingMetrics>(`/api/metrics/rolling${qs(scopeParams(scope))}`),
     refetchInterval: 2000,
     placeholderData: keepPreviousData,
   })
@@ -66,20 +77,31 @@ export function useLifetime() {
   })
 }
 
-export function useCost(from: string | undefined, backend?: Backend) {
+export function useCost(from: string | undefined, scope?: Scope) {
   return useQuery({
-    queryKey: ['cost', from ?? '', backend ?? 'all'],
-    queryFn: () => apiGet<CostTable>(`/api/metrics/cost${qs({ from, backend })}`),
+    queryKey: ['cost', from ?? '', scopeKey(scope)],
+    queryFn: () => apiGet<CostTable>(`/api/metrics/cost${qs({ from, ...scopeParams(scope) })}`),
     enabled: !!from,
     refetchInterval: 5000,
     placeholderData: keepPreviousData,
   })
 }
 
-export function useSeries(metric: SeriesMetric, fromIso: string, backend?: Backend, model?: string) {
+/** What the cloud providers charged at list price since `from`. */
+export function useSpend(from: string | undefined) {
   return useQuery({
-    queryKey: ['series', metric, fromIso, backend ?? 'all', model ?? ''],
-    queryFn: () => apiGet<Series>(`/api/metrics/series${qs({ metric, from: fromIso, backend, model })}`),
+    queryKey: ['spend', from ?? ''],
+    queryFn: () => apiGet<Spend>(`/api/metrics/spend${qs({ from })}`),
+    enabled: !!from,
+    refetchInterval: 5000,
+    placeholderData: keepPreviousData,
+  })
+}
+
+export function useSeries(metric: SeriesMetric, fromIso: string, scope?: Scope, model?: string) {
+  return useQuery({
+    queryKey: ['series', metric, fromIso, scopeKey(scope), model ?? ''],
+    queryFn: () => apiGet<Series>(`/api/metrics/series${qs({ metric, from: fromIso, ...scopeParams(scope), model })}`),
     refetchInterval: 10000,
     placeholderData: keepPreviousData,
   })

@@ -6,7 +6,7 @@ use axum::http::{StatusCode, header};
 use axum::response::Response;
 use chrono::{DateTime, Utc};
 use gateway_core::store::read::{self, RequestDetail, RequestFilter, RequestPage};
-use gateway_core::types::{Backend, Direction, InflightRequest};
+use gateway_core::types::{Backend, BackendGroup, Direction, InflightRequest};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -18,6 +18,7 @@ pub struct ListQuery {
     pub cursor: Option<String>,
     pub limit: Option<usize>,
     pub backend: Option<Backend>,
+    pub group: Option<BackendGroup>,
     pub model: Option<String>,
     pub outcome: Option<String>,
     pub format: Option<String>,
@@ -37,6 +38,7 @@ pub async fn api_list(
     let store = store(&st)?;
     let filter = RequestFilter {
         backend: q.backend,
+        group: q.group,
         model: q.model.filter(|s| !s.is_empty()),
         outcome: q.outcome.filter(|s| !s.is_empty()),
         api_format: q.format.filter(|s| !s.is_empty()),
