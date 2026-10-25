@@ -14,6 +14,7 @@ pub mod gemini;
 pub mod line_buffer;
 pub mod ollama;
 pub mod openai;
+pub mod raw;
 pub mod responses;
 pub mod sse_frames;
 
@@ -156,7 +157,9 @@ pub fn select(
     let json = ct.contains("application/json");
     let streamed = sse || (!json && request_streamed);
     Some(match format {
-        ApiFormat::Passthrough | ApiFormat::CloudPassthrough => return None,
+        ApiFormat::Passthrough => return None,
+        // Scanned, stored, never interpreted: the raw parser only keeps the text for the DLP scan.
+        ApiFormat::CloudPassthrough => Box::new(raw::RawTextParser::new()),
         // Ollama streams by default: NDJSON or no content type means a stream; plain JSON is one object.
         ApiFormat::OllamaNative => Box::new(ollama::OllamaParser::new(ndjson || !json)),
         ApiFormat::OllamaEmbeddings => Box::new(embeddings::EmbeddingsParser::new(

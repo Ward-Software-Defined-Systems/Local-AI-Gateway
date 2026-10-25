@@ -36,6 +36,7 @@ use crate::http;
 use crate::listener::{ListenerMode, ProxyState, TargetFlags};
 use crate::parsers::{self, StreamParser, WallClock};
 use crate::rejection;
+use crate::route;
 use crate::router;
 use crate::scan::{Decision, ScanContext, ScanOutcome};
 
@@ -155,7 +156,7 @@ pub async fn handle(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     req: Request,
 ) -> Response {
-    let meta = RequestMeta::new(&st, addr, &req);
+    let mut meta = RequestMeta::new(&st, addr, &req);
     debug!(request = %meta.id, backend = %meta.backend, method = %meta.method, path = %meta.path, format = %meta.api_format, "request received");
     if router::is_upgrade(req.headers()) {
         st.ctx.inflight_insert(meta.inflight(RequestKind::Upgrade));
@@ -167,7 +168,21 @@ pub async fn handle(
         );
         return crate::tunnel::handle(st, meta, req).await;
     }
-    if meta.api_format.is_inference() {
+    if meta.backend.is_cloud_provider() {
+        if let Some(header) = route::credential_conflict(req.headers(), meta.backend) {
+            warn!(request = %meta.id, header, backend = %meta.backend, "request carries another provider's credential; refused");
+            let err = ProxyError::CredentialMismatch {
+                header,
+                backend: meta.backend,
+            };
+            return fail_gateway(&st, meta, err, None, Vec::new()).await;
+        }
+        // Any body bound for a cloud provider leaves the machine, whatever the path: scan and keep it.
+        if !meta.api_format.is_inference() && !req.body().is_end_stream() {
+            meta.api_format = ApiFormat::CloudPassthrough;
+        }
+    }
+    if meta.api_format.is_inference() || meta.api_format == ApiFormat::CloudPassthrough {
         inference(st, meta, req).await
     } else {
         passthrough(st, meta, req).await
@@ -353,6 +368,14 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
             _ => false,
         };
     st.ctx.inflight_insert(meta.inflight(RequestKind::Http));
+    if meta.backend.is_cloud_provider() && !route::compatible(meta.api_format, meta.backend) {
+        // Refused here rather than by the provider: nothing leaves, and the client learns why.
+        let err = ProxyError::FormatMismatch {
+            format: meta.api_format,
+            backend: meta.backend,
+        };
+        return fail_gateway(&st, meta, err, None, Vec::new()).await;
+    }
     publish(
         &st.ctx.events,
         GatewayEvent::RequestStarted {
@@ -413,6 +436,11 @@ async fn inference(st: ProxyState, mut meta: RequestMeta, req: Request) -> Respo
     };
     let url = meta.upstream_url();
     let mut headers = http::forwardable(&parts.headers, true);
+    if meta.backend.is_cloud_provider() {
+        // The parsers and the DLP scan need plaintext and the gateway decompresses nothing; a provider
+        // answers uncompressed when nothing is accepted.
+        headers.remove(header::ACCEPT_ENCODING);
+    }
     headers.insert("x-request-id", request_id_value(meta.id));
     let upstream = match st
         .ctx
@@ -718,11 +746,28 @@ impl Finisher {
         .map(str::to_string)
         .or_else(|| parsed.model.clone())
         .or_else(|| meta.model_requested.clone());
-        let hypothetical_cost = match (parsed.prompt_tokens, parsed.gen_tokens) {
-            (Some(prompt), Some(generated)) if outcome.is_completed() => {
-                st.ctx.pricing().totals(prompt, generated)
-            }
-            _ => Default::default(),
+        let counted = match (parsed.prompt_tokens, parsed.gen_tokens) {
+            (Some(prompt), Some(generated)) if outcome.is_completed() => Some((prompt, generated)),
+            _ => None,
+        };
+        // Local traffic gets the hypothetical frontier columns; a cloud provider's request cost real money
+        // at that provider's own list price, when its model is in the table.
+        let (hypothetical_cost, actual_cost_usd) = if meta.backend.is_cloud_provider() {
+            let actual = counted.and_then(|(prompt, generated)| {
+                let model = model_resolved
+                    .as_deref()
+                    .or(meta.model_requested.as_deref())?;
+                let (_, price) = st.ctx.pricing().price_for_model(model)?;
+                Some(gateway_core::pricing::hypothetical_cost(prompt, generated, &price).total_usd)
+            });
+            (Default::default(), actual)
+        } else {
+            (
+                counted
+                    .map(|(prompt, generated)| st.ctx.pricing().totals(prompt, generated))
+                    .unwrap_or_default(),
+                None,
+            )
         };
         let total_ms =
             if outcome.is_completed() && !parsed.timings_estimated && parsed.total_ms > 0.0 {
@@ -785,6 +830,7 @@ impl Finisher {
             finding_count: findings.len() as u32,
             max_severity: findings.iter().map(|f| f.severity).max(),
             hypothetical_cost,
+            actual_cost_usd,
             ..base_record(&st, &meta, kind)
         };
         complete(&st, record, bodies, findings).await;
@@ -1014,11 +1060,28 @@ async fn fail_gateway(
     response
 }
 
+/// The API family an error answer takes: the request's own, or the provider's native shape for a request to
+/// a cloud provider outside the inference formats (its client speaks that provider's dialect).
+fn error_format(meta: &RequestMeta) -> ApiFormat {
+    match meta.api_format {
+        ApiFormat::Passthrough | ApiFormat::CloudPassthrough
+            if meta.backend.is_cloud_provider() =>
+        {
+            match meta.backend {
+                Backend::Anthropic => ApiFormat::AnthropicMessages,
+                Backend::Gemini => ApiFormat::GeminiGenerate,
+                _ => ApiFormat::OpenAiChat,
+            }
+        }
+        other => other,
+    }
+}
+
 /// The gateway's own error, shaped for the request's API family.
 pub fn gateway_error_response(meta: &RequestMeta, err: &ProxyError) -> Response {
     let status = err.status();
     let (content_type, body) =
-        http::error_body(meta.api_format, status, &err.to_string(), err.code());
+        http::error_body(error_format(meta), status, &err.to_string(), err.code());
     let mut builder = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, content_type)

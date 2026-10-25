@@ -3,6 +3,7 @@
 //! it for the client's API family.
 
 use axum::http::StatusCode;
+use gateway_core::types::{ApiFormat, Backend};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProxyError {
@@ -20,6 +21,16 @@ pub enum ProxyError {
     UpgradeFailed,
     #[error("request blocked by gateway DLP policy (rule {rule_id})")]
     Blocked { rule_id: String },
+    /// A cloud provider does not serve the request's API format; nothing was sent to it.
+    #[error("{format} requests are not served by {}; use a format it speaks or a model another backend serves", backend.display_name())]
+    FormatMismatch { format: ApiFormat, backend: Backend },
+    /// The request carries a header that belongs to another cloud provider's API, so forwarding it would
+    /// hand that provider's credential to the wrong host.
+    #[error("the request carries {header}, which belongs to another provider's API, but is addressed to {}", backend.display_name())]
+    CredentialMismatch {
+        header: &'static str,
+        backend: Backend,
+    },
 }
 
 impl ProxyError {
@@ -27,7 +38,9 @@ impl ProxyError {
         match self {
             ProxyError::UpstreamUnreachable | ProxyError::UpgradeFailed => StatusCode::BAD_GATEWAY,
             ProxyError::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            ProxyError::BodyUnreadable => StatusCode::BAD_REQUEST,
+            ProxyError::BodyUnreadable
+            | ProxyError::FormatMismatch { .. }
+            | ProxyError::CredentialMismatch { .. } => StatusCode::BAD_REQUEST,
             ProxyError::ResponseBuild => StatusCode::INTERNAL_SERVER_ERROR,
             ProxyError::UnsupportedMethod => StatusCode::METHOD_NOT_ALLOWED,
             ProxyError::Blocked { .. } => StatusCode::FORBIDDEN,
@@ -43,6 +56,8 @@ impl ProxyError {
             ProxyError::UnsupportedMethod => "unsupported_method",
             ProxyError::UpgradeFailed => "upgrade_failed",
             ProxyError::Blocked { .. } => "dlp_blocked",
+            ProxyError::FormatMismatch { .. } => "format_not_served",
+            ProxyError::CredentialMismatch { .. } => "credential_mismatch",
         }
     }
 }
@@ -82,6 +97,28 @@ mod tests {
             }
             .to_string(),
             "request blocked by gateway DLP policy (rule aws)"
+        );
+        let mismatch = ProxyError::FormatMismatch {
+            format: ApiFormat::OpenAiEmbeddings,
+            backend: Backend::Anthropic,
+        };
+        assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(mismatch.code(), "format_not_served");
+        assert!(
+            mismatch
+                .to_string()
+                .starts_with("openai_embeddings requests are not served by Anthropic"),
+            "{mismatch}"
+        );
+        let credential = ProxyError::CredentialMismatch {
+            header: "x-goog-api-key",
+            backend: Backend::Anthropic,
+        };
+        assert_eq!(credential.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(credential.code(), "credential_mismatch");
+        assert!(
+            credential.to_string().contains("x-goog-api-key"),
+            "{credential}"
         );
     }
 }

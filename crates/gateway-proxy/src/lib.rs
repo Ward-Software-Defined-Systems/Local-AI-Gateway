@@ -13,6 +13,7 @@ pub mod listener;
 pub mod parsers;
 pub mod pipeline;
 pub mod rejection;
+pub mod route;
 pub mod router;
 pub mod scan;
 pub mod tunnel;

@@ -675,6 +675,284 @@ async fn a_cloud_listener_redacts_the_key_query_and_passes_redirects_through() {
     assert!(record.is_cloud);
 }
 
+/// An OpenAI chat completion as a provider's compat endpoint answers it: a million tokens each way so the
+/// cost at list price is a round number.
+const CHAT_JSON: &str = r#"{"id":"chatcmpl-1","object":"chat.completion","created":0,"model":"claude-opus-5-5","choices":[{"index":0,"message":{"role":"assistant","content":"Hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000000,"completion_tokens":1000000,"total_tokens":2000000}}"#;
+
+/// A POST outside the inference formats to a cloud provider is scanned and recorded with its bodies; a
+/// finding under a blocking policy stops it with the provider's own error shape.
+#[tokio::test]
+async fn a_cloud_post_outside_the_inference_formats_is_scanned_and_recorded() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let mock = Router::new().route(
+        "/v1/messages/count_tokens",
+        post(move || {
+            let hits = hits2.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    [(header::CONTENT_TYPE, "application/json")],
+                    r#"{"input_tokens":12}"#,
+                )
+            }
+        }),
+    );
+    let upstream = spawn_upstream(mock).await;
+    let mut blocked = start_proxy(
+        upstream.clone(),
+        Options {
+            backend: Backend::Anthropic,
+            scanner: Some(Arc::new(BlockAkia {
+                calls: AtomicUsize::new(0),
+            })),
+            ..Default::default()
+        },
+    );
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/messages/count_tokens", blocked.url))
+        .header("x-api-key", "sk-ant-test")
+        .body(r#"{"model":"claude-opus-5-5","messages":[{"role":"user","content":"AKIAIOSFODNN7EXAMPLE"}]}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["type"], "error", "Anthropic's error shape: {body}");
+    assert_eq!(body["error"]["type"], "permission_error");
+    let record = next_record(&mut blocked.events).await;
+    assert_eq!(record.api_format, ApiFormat::CloudPassthrough);
+    assert_eq!(
+        record.outcome,
+        Outcome::Blocked {
+            rule_id: "aws-access-key-id".into()
+        }
+    );
+    assert!(record.is_cloud);
+    assert_eq!(record.model_requested.as_deref(), Some("claude-opus-5-5"));
+    assert!(!record.is_feed_row());
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "nothing left the machine");
+
+    let mut clean = start_proxy(
+        upstream,
+        Options {
+            backend: Backend::Anthropic,
+            ..Default::default()
+        },
+    );
+    let resp = client
+        .post(format!("{}/v1/messages/count_tokens", clean.url))
+        .body(r#"{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hello"}]}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.text().await.unwrap(), r#"{"input_tokens":12}"#);
+    let record = next_record(&mut clean.events).await;
+    assert_eq!(record.api_format, ApiFormat::CloudPassthrough);
+    assert_eq!(record.outcome, Outcome::Completed);
+    assert_eq!(record.status, Some(200));
+    assert_eq!(record.response_bytes, r#"{"input_tokens":12}"#.len() as u64);
+    assert!(record.is_cloud);
+    assert_eq!(
+        record.prompt_tokens, None,
+        "nothing is read out of a passthrough answer"
+    );
+    assert!(record.actual_cost_usd.is_none());
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+/// Cloud targets get identity encoding so the parsers can read the answer; local ones keep the client's
+/// choice. A completed request to a provider carries its real cost and no hypothetical columns.
+#[tokio::test]
+async fn cloud_targets_get_identity_encoding_and_a_real_cost() {
+    use std::sync::Mutex;
+    let seen: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+    let seen2 = seen.clone();
+    let mock = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: HeaderMap| {
+            let seen = seen2.clone();
+            async move {
+                seen.lock().unwrap().push(
+                    headers
+                        .get(header::ACCEPT_ENCODING)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string),
+                );
+                ([(header::CONTENT_TYPE, "application/json")], CHAT_JSON)
+            }
+        }),
+    );
+    let upstream = spawn_upstream(mock).await;
+    let body = r#"{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}]}"#;
+    let client = reqwest::Client::builder()
+        .no_gzip()
+        .no_brotli()
+        .build()
+        .unwrap();
+
+    let mut cloud = start_proxy(
+        upstream.clone(),
+        Options {
+            backend: Backend::Anthropic,
+            ..Default::default()
+        },
+    );
+    let resp = client
+        .post(format!("{}/v1/chat/completions", cloud.url))
+        .header(header::ACCEPT_ENCODING, "gzip, br")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.text().await.unwrap(), CHAT_JSON);
+    let record = next_record(&mut cloud.events).await;
+    assert_eq!(record.outcome, Outcome::Completed);
+    assert!(record.is_cloud);
+    assert_eq!(record.model_resolved.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(
+        record.actual_cost_usd,
+        Some(24.0),
+        "4 + 20 USD per million at Claude Opus 5.5's list price"
+    );
+    assert!(
+        record.hypothetical_cost.is_empty(),
+        "no frontier columns for a provider's own request"
+    );
+    assert_eq!(
+        seen.lock().unwrap().as_slice(),
+        [None],
+        "accept-encoding stripped"
+    );
+
+    let mut local = start_proxy(upstream, Options::default());
+    let resp = client
+        .post(format!("{}/v1/chat/completions", local.url))
+        .header(header::ACCEPT_ENCODING, "gzip, br")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let record = next_record(&mut local.events).await;
+    assert!(!record.is_cloud);
+    assert_eq!(record.actual_cost_usd, None);
+    assert!(record.hypothetical_cost.contains_key("claude-fable-5-1"));
+    assert_eq!(
+        seen.lock().unwrap()[1].as_deref(),
+        Some("gzip, br"),
+        "a local server sees the client's header"
+    );
+}
+
+/// A format the provider does not serve, or a header that belongs to another provider, is refused by the
+/// gateway before anything is sent.
+#[tokio::test]
+async fn mismatched_formats_and_credentials_are_refused_before_anything_leaves() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let mock = Router::new().fallback(any(move || {
+        let hits = hits2.clone();
+        async move {
+            hits.fetch_add(1, Ordering::SeqCst);
+            ([(header::CONTENT_TYPE, "application/json")], "{}")
+        }
+    }));
+    let upstream = spawn_upstream(mock).await;
+    let client = reqwest::Client::new();
+
+    let mut anthropic = start_proxy(
+        upstream.clone(),
+        Options {
+            backend: Backend::Anthropic,
+            ..Default::default()
+        },
+    );
+    let resp = client
+        .post(format!("{}/v1/embeddings", anthropic.url))
+        .body(r#"{"model":"claude-opus-5-5","input":"x"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "format_not_served", "{body}");
+    let record = next_record(&mut anthropic.events).await;
+    assert_eq!(
+        record.outcome,
+        Outcome::Failed {
+            status: 400,
+            source: FailureSource::Gateway
+        }
+    );
+    assert_eq!(record.api_format, ApiFormat::OpenAiEmbeddings);
+
+    let mut gemini = start_proxy(
+        upstream.clone(),
+        Options {
+            backend: Backend::Gemini,
+            ..Default::default()
+        },
+    );
+    let resp = client
+        .get(format!("{}/v1beta/models", gemini.url))
+        .header("anthropic-version", "2023-06-01")
+        .header("x-api-key", "sk-ant-oops")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["error"]["status"], "INVALID_ARGUMENT",
+        "Google's shape: {body}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("anthropic-version")
+    );
+    let record = next_record(&mut gemini.events).await;
+    assert_eq!(
+        record.outcome,
+        Outcome::Failed {
+            status: 400,
+            source: FailureSource::Gateway
+        }
+    );
+    assert!(
+        record
+            .error_summary
+            .as_deref()
+            .unwrap()
+            .contains("anthropic-version")
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "neither request left the machine"
+    );
+
+    let mut ollama = start_proxy(upstream, Options::default());
+    let resp = client
+        .get(format!("{}/v1/models", ollama.url))
+        .header("anthropic-version", "2023-06-01")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "local targets take any header"
+    );
+    let _ = next_record(&mut ollama.events).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
 /// What the LM Studio poller publishes for a loaded model: enough for the context-length fallback.
 fn snapshot_with_loaded_model(id: &str, context: u64) -> BackendSnapshot {
     BackendSnapshot {
