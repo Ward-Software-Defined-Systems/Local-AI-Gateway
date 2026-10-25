@@ -187,8 +187,9 @@ configuration, engine and pricing through `Hot`, so a reload is visible to the n
 
 `fixtures/` holds real captures, never hand-edited: LM Studio 0.4.25 (MLX engine, `qwen/qwen3.6-27b`) and
 Ollama 0.40.6 (`gemma4:12b-mlx`) answering every inference format with a tiny `max_tokens`, plus model lists,
-an `ioreg` dump, three Ollama error bodies and eight LM Studio context-overflow refusals (a 6000-token prompt
-into a 2048-token context). What they settled: LM Studio sends a usage frame on
+an `ioreg` dump, an `nvidia-smi` query from an Ubuntu server with one idle 12 GiB card, three Ollama error
+bodies and eight LM Studio context-overflow refusals (a 6000-token prompt into a 2048-token context). What
+they settled: LM Studio sends a usage frame on
 `/v1/chat/completions` and `/api/v0/chat/completions` streams only when `stream_options.include_usage` is set
 (hence `rewrite_include_usage`, which now covers `LmStudioNative` too), puts `usage` on the last frame of
 completion streams unasked, carries engine `stats` only on non-streaming `/api/v0` objects, and reports zero

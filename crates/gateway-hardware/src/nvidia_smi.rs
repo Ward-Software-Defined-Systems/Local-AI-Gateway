@@ -109,6 +109,10 @@ pub async fn sample() -> Option<GpuReading> {
 mod tests {
     use super::*;
 
+    /// `nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits`
+    /// on an Ubuntu server with one idle 12 GiB card.
+    const FIXTURE: &str = include_str!("../../../fixtures/hardware/nvidia-smi-query-gpu.csv");
+
     #[test]
     fn parse_line_variants() {
         assert_eq!(
@@ -144,6 +148,19 @@ mod tests {
         assert_eq!(parse("No devices were found\n"), None);
         let na = parse("0, [N/A], [N/A], [N/A]\n").unwrap();
         assert_eq!((na.util_pct, na.mem_used_bytes), (None, None));
+    }
+
+    #[test]
+    fn fixture_single_idle_gpu_reads_zero_util_and_mib_memory() {
+        assert_eq!(
+            parse(FIXTURE),
+            Some(GpuReading {
+                util_pct: Some(0.0),
+                mem_used_bytes: Some(9 * MIB),
+                mem_total_bytes: Some(12288 * MIB),
+                gpu_count: 1,
+            })
+        );
     }
 
     /// `cargo test -p gateway-hardware live_nvidia -- --ignored --nocapture` (Linux with the driver).
