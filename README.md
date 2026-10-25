@@ -27,14 +27,49 @@ macOS (Apple Silicon) and Ubuntu Linux (x86_64 with an NVIDIA GPU) are both supp
 
 ## Quick start
 
-Requirements: Rust 1.97 (see `rust-toolchain.toml`) and Node 24 for the dashboard build.
+### Rust and Node
+
+The gateway is a Rust program and its dashboard is built with Node, so both toolchains are needed on the machine that builds it. Check what is already there:
+
+```sh
+rustup --version    # rustup 1.28 or newer; the Rust version itself is pinned by this repository
+node --version      # v24.x.x, the long-term-support line this project builds with
+npm --version       # installed together with Node
+make --version      # GNU Make, any version
+```
+
+`command not found` means a tool is missing; a Node older than 24 needs replacing. If all four look right, skip to the build.
+
+**Rust.** Install it with rustup, the official installer, the same way on both platforms. A Rust from Homebrew or from `apt` is one fixed version that cannot follow `rust-toolchain.toml`, so remove it first (`brew uninstall rust`, or `sudo apt remove rustc cargo`); an old rustup is brought up to date with `rustup self update`.
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh    # accept the default installation
+. "$HOME/.cargo/env"                                               # or open a new terminal
+```
+
+Inside the checkout, `rustup toolchain install` with no arguments reads `rust-toolchain.toml` and fetches exactly the pinned version with `rustfmt` and `clippy`; `cargo --version` then shows it. Building also needs a C compiler and linker: on macOS run `xcode-select --install` (which brings `git` and `make` too), on Ubuntu `sudo apt install build-essential curl git`.
+
+**Node.** On macOS, download the LTS installer from [nodejs.org](https://nodejs.org/), or run `brew install node@24` and add the `PATH` line Homebrew prints at the end. On Ubuntu the distribution's own `nodejs` package is too old; add the NodeSource repository for Node 24, which `apt` then keeps up to date:
+
+```sh
+curl -fsSL https://deb.nodesource.com/setup_24.x -o nodesource_setup.sh
+sudo -E bash nodesource_setup.sh && rm nodesource_setup.sh
+sudo apt install -y nodejs                                         # npm comes with it
+```
+
+On either platform, [nvm](https://github.com/nvm-sh/nvm) (`nvm install 24`) keeps Node in your home directory and needs no root. Run the version checks again before building.
+
+### Build and run
 
 ```sh
 make release                                  # builds the dashboard, then the binary with it embedded
+mkdir -p ~/.local/bin                         # the usual place for your own binaries; see the PATH note below
 install -m 755 target/release/local-ai-gateway ~/.local/bin/
 local-ai-gateway config init                  # writes a commented config.toml with every default
 local-ai-gateway                              # prints the dashboard URL with its access token
 ```
+
+`~/.local/bin` has to be on your `PATH` for the last two commands to find the binary. Ubuntu's default shell profile adds the directory on your next login once it exists, so log out and in again or run `source ~/.profile`. macOS does not add it: run `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc` once and open a new terminal. The service installed below records the binary's absolute path and does not depend on `PATH`.
 
 Open the printed URL once; it sets a cookie and redirects to the clean address. Later, `local-ai-gateway --print-token` prints it again.
 
