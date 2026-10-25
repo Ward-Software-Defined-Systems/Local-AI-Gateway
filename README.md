@@ -283,7 +283,7 @@ Request metadata and findings are kept indefinitely; bodies expire after `retent
 - Open streams that outlive the five-second shutdown grace are cut without a record.
 - Reply text is scanned once at the end of the response, not incrementally.
 - Changing a backend's `capture_bodies`, `record_passthrough` or `rewrite_include_usage` needs a restart.
-- There is no OpenAI capture: the OpenAI shapes are tested on the LM Studio, Ollama, Anthropic and Gemini captures. The Interactions API has no capture either; its parser follows the structure of a live image answer and Google's documentation.
+- There is no OpenAI capture: the OpenAI shapes are tested on the LM Studio, Ollama, Anthropic and Gemini captures.
 - Spend is flat list price per token. Gemini's image models bill images as output tokens at a rate of their own, and `pricing.toml` carries that rate for them, so an image answer is priced right and any text or thinking tokens from those models are overpriced. Gemini 3.5 Flash and 3.7 Flash have no row because Google's pricing page does not list them; add one under `[pricing.providers.google.models]` when you know the rate. Gemini 4 Argon is listed at its price until 30 November 2026; Google doubles it from 1 December 2026.
 - A Gemini stream requested without `alt=sse` is a JSON array; it is parsed once it is complete, so its figures arrive at the end.
 - The cloud providers are not polled: no reachability, version or model list for them in the dashboard, and the merged `GET /v1/models` answer lists only the local servers' models and your aliases. That answer is gateway-generated and not recorded.

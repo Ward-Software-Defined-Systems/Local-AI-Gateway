@@ -8,8 +8,9 @@
 //! `thought_signature` or `arguments_delta`), `step.stop`, `interaction.completed` with the final object
 //! and its `usage`, `error`, then `done` with `[DONE]`. Output is counted like Gemini's other API: the
 //! reply plus its reasoning. Text parts and thought summaries are reply text for the scanner; image bytes
-//! are not. The shapes come from a live `gemini-3-pro-image` answer and Google's streaming documentation;
-//! there is no capture in `fixtures/` yet.
+//! are not. The tests run on captures in `fixtures/gemini/interactions-*`: `gemini-3.5-flash-lite` plain,
+//! streamed and cut by `max_output_tokens`, `gemini-4-argon` with a thinking summary, a 512-pixel
+//! `gemini-3.1-flash-image` answer and Google's `image/png` refusal.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -258,41 +259,33 @@ mod tests {
     use super::*;
     use crate::parsers::parse_all;
 
-    /// The structure of a live `gemini-3-pro-image` answer to a text-to-image request, with the signature
-    /// and the image bytes cut to a few characters and a text part added to show the reply text.
-    const IMAGE_ANSWER: &str = r#"{"id":"v1_abc","status":"completed","usage":{"total_tokens":1610,"total_input_tokens":95,"input_tokens_by_modality":[{"modality":"text","tokens":95}],"total_cached_tokens":0,"total_output_tokens":1276,"output_tokens_by_modality":[{"modality":"image","tokens":1120}],"total_tool_use_tokens":0,"total_thought_tokens":239},"created":"2026-10-25T19:17:09Z","updated":"2026-10-25T19:17:09Z","service_tier":"standard","steps":[{"signature":"c2ln","type":"thought"},{"content":[{"text":"Here is the lighthouse.","type":"text"},{"data":"/9j/4AAQ","mime_type":"image/jpeg","type":"image"}],"type":"model_output"}],"object":"interaction","model":"gemini-3-pro-image"}"#;
+    const NONSTREAM: &str = include_str!("../../../../fixtures/gemini/interactions-nonstream.json");
+    const SSE: &str = include_str!("../../../../fixtures/gemini/interactions-sse.txt");
+    const THINKING_SUMMARY: &str =
+        include_str!("../../../../fixtures/gemini/interactions-sse-thinking-summary.txt");
+    const INCOMPLETE: &str =
+        include_str!("../../../../fixtures/gemini/interactions-sse-incomplete.txt");
+    const BAD_MIME: &str =
+        include_str!("../../../../fixtures/gemini/interactions-400-bad-mime.json");
+    const IMAGE: &str = include_str!("../../../../fixtures/gemini/interactions-image-512.json");
 
-    /// Google's documented streaming sequence for a text answer.
-    const STREAM: &str = "event: interaction.created\ndata: {\"interaction\":{\"id\":\"v1_abc\",\"model\":\"gemini-3.5-flash-lite\",\"status\":\"in_progress\"},\"event_type\":\"interaction.created\"}\n\n\
-event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"thought\"},\"event_type\":\"step.start\"}\n\n\
-event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thought_summary\",\"content\":{\"type\":\"text\",\"text\":\"Greeting. \"}},\"event_type\":\"step.delta\"}\n\n\
-event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thought_signature\",\"signature\":\"c2ln\"},\"event_type\":\"step.delta\"}\n\n\
-event: step.stop\ndata: {\"index\":0,\"event_type\":\"step.stop\"}\n\n\
-event: step.start\ndata: {\"index\":1,\"step\":{\"type\":\"model_output\"},\"event_type\":\"step.start\"}\n\n\
-event: step.delta\ndata: {\"index\":1,\"delta\":{\"type\":\"text\",\"text\":\"Hi \"},\"event_type\":\"step.delta\"}\n\n\
-event: step.delta\ndata: {\"index\":1,\"delta\":{\"type\":\"text\",\"text\":\"there!\"},\"event_type\":\"step.delta\"}\n\n\
-event: step.stop\ndata: {\"index\":1,\"event_type\":\"step.stop\"}\n\n\
-event: interaction.completed\ndata: {\"interaction\":{\"id\":\"v1_abc\",\"status\":\"completed\",\"usage\":{\"total_tokens\":346,\"total_input_tokens\":11,\"total_output_tokens\":90,\"total_thought_tokens\":245},\"object\":\"interaction\",\"model\":\"gemini-3.5-flash-lite\"},\"event_type\":\"interaction.completed\"}\n\n\
-event: done\ndata: [DONE]\n\n";
+    const CHUNKS: [usize; 4] = [1, 7, 64, 4096];
 
     #[test]
-    fn a_single_interaction_counts_input_output_and_thoughts_and_keeps_the_text() {
-        for chunk in [1, 7, 64, 4096] {
+    fn fixture_single_interaction_counts_input_and_output_and_keeps_the_text() {
+        for chunk in CHUNKS {
             let parsed = parse_all(
                 Box::new(InteractionsParser::new(false)),
-                IMAGE_ANSWER.as_bytes(),
+                NONSTREAM.as_bytes(),
                 chunk,
             )
             .unwrap();
-            assert_eq!(parsed.model.as_deref(), Some("gemini-3-pro-image"));
-            assert_eq!(parsed.prompt_tokens, Some(95));
-            assert_eq!(parsed.gen_tokens, Some(1276 + 239), "output plus thoughts");
+            assert_eq!(parsed.model.as_deref(), Some("gemini-3.5-flash-lite"));
+            assert_eq!(parsed.prompt_tokens, Some(4));
+            assert_eq!(parsed.gen_tokens, Some(9));
             assert!(!parsed.tokens_estimated);
             assert_eq!(parsed.stop_reason.as_deref(), Some("completed"));
-            assert_eq!(
-                parsed.text, "Here is the lighthouse.",
-                "image bytes are not text"
-            );
+            assert_eq!(parsed.text, "Hi! How can I help you today?");
             assert_eq!(
                 parsed.ttft_ms, None,
                 "a single object has no first-token time"
@@ -302,54 +295,144 @@ event: done\ndata: [DONE]\n\n";
         }
     }
 
+    /// A 512-pixel answer from `gemini-3.1-flash-image`: a `thought` step with no content, then an image
+    /// part. The image tokens are output tokens, and there is no text.
     #[test]
-    fn a_stream_joins_text_and_summaries_and_takes_the_counts_from_the_completion() {
-        for chunk in [1, 7, 64, 4096] {
+    fn fixture_image_answer_counts_image_tokens_as_output_and_has_no_text() {
+        let parsed = parse_all(
+            Box::new(InteractionsParser::new(false)),
+            IMAGE.as_bytes(),
+            65536,
+        )
+        .unwrap();
+        assert_eq!(parsed.model.as_deref(), Some("gemini-3.1-flash-image"));
+        assert_eq!(parsed.prompt_tokens, Some(23));
+        assert_eq!(
+            parsed.gen_tokens,
+            Some(1123),
+            "747 image tokens inside 1123 output tokens"
+        );
+        assert!(!parsed.tokens_estimated);
+        assert_eq!(parsed.stop_reason.as_deref(), Some("completed"));
+        assert_eq!(parsed.text, "", "image bytes are not reply text");
+        assert!(!parsed.text_truncated);
+    }
+
+    #[test]
+    fn fixture_stream_joins_the_deltas_and_takes_the_counts_from_the_completion() {
+        for chunk in CHUNKS {
             let parsed = parse_all(
                 Box::new(InteractionsParser::new(true)),
-                STREAM.as_bytes(),
+                SSE.as_bytes(),
                 chunk,
             )
             .unwrap();
             assert_eq!(parsed.model.as_deref(), Some("gemini-3.5-flash-lite"));
-            assert_eq!(parsed.prompt_tokens, Some(11));
-            assert_eq!(parsed.gen_tokens, Some(90 + 245));
+            assert_eq!(parsed.prompt_tokens, Some(4));
+            assert_eq!(parsed.gen_tokens, Some(9));
             assert!(!parsed.tokens_estimated);
             assert_eq!(parsed.stop_reason.as_deref(), Some("completed"));
-            assert_eq!(parsed.text, "Greeting. Hi there!");
+            assert_eq!(parsed.text, "Hi! How can I help you today?");
             assert!(parsed.ttft_ms.is_some());
+            assert!(parsed.timings_estimated);
         }
+    }
+
+    /// `gemini-4-argon` at `thinking_level: high` with `thinking_summaries: auto`: the summary arrives as
+    /// a `thought_summary` delta before the answer and is reply text; the thinking tokens count as output.
+    #[test]
+    fn fixture_thinking_summary_is_reply_text_and_thoughts_count_as_output() {
+        for chunk in CHUNKS {
+            let parsed = parse_all(
+                Box::new(InteractionsParser::new(true)),
+                THINKING_SUMMARY.as_bytes(),
+                chunk,
+            )
+            .unwrap();
+            assert_eq!(parsed.model.as_deref(), Some("gemini-4-argon"));
+            assert_eq!(parsed.prompt_tokens, Some(66));
+            assert_eq!(parsed.gen_tokens, Some(6 + 436));
+            assert_eq!(parsed.stop_reason.as_deref(), Some("completed"));
+            assert!(
+                parsed.text.starts_with("**Calculating the Number**"),
+                "{}",
+                parsed.text
+            );
+            assert!(parsed.text.ends_with("23"), "{}", parsed.text);
+            assert_eq!(parsed.text.len(), 445 + 2);
+        }
+    }
+
+    /// `max_output_tokens: 64` cut a `gemini-3.5-flash-lite` answer after one token: the cap counts the
+    /// thinking, the status is `incomplete`, and the `thought_signature` delta is not text.
+    #[test]
+    fn fixture_an_incomplete_interaction_reports_its_status() {
+        let parsed = parse_all(
+            Box::new(InteractionsParser::new(true)),
+            INCOMPLETE.as_bytes(),
+            32,
+        )
+        .unwrap();
+        assert_eq!(parsed.prompt_tokens, Some(36));
+        assert_eq!(parsed.gen_tokens, Some(1 + 59));
+        assert_eq!(parsed.stop_reason.as_deref(), Some("incomplete"));
+        assert_eq!(parsed.text, "2");
+        assert_eq!(parsed.in_stream_error, None);
     }
 
     #[test]
     fn a_cut_stream_waits_for_the_completion_then_estimates() {
-        let cut = STREAM.split("event: interaction.completed").next().unwrap();
+        let cut = SSE.split("event: interaction.completed").next().unwrap();
         let mut parser = InteractionsParser::new(true);
         parser.push(cut.as_bytes());
         assert!(
             parser.awaiting_trailer(),
             "a step stopped and the counts have not arrived"
         );
-        assert_eq!(parser.take_text_deltas().join(""), "Greeting. Hi there!");
+        assert_eq!(
+            parser.take_text_deltas().join(""),
+            "Hi! How can I help you today?"
+        );
         let wall = WallClock {
             started: std::time::Instant::now(),
             first_byte: None,
             ended: std::time::Instant::now(),
         };
         let parsed = Box::new(parser).finalize(&wall).unwrap();
-        assert_eq!(parsed.gen_tokens, Some(3), "three text deltas");
+        assert_eq!(parsed.gen_tokens, Some(2), "two text deltas");
         assert!(parsed.tokens_estimated);
         assert_eq!(parsed.prompt_tokens, None);
-        assert_eq!(parsed.stop_reason.as_deref(), Some("unknown"));
+        assert_eq!(
+            parsed.stop_reason.as_deref(),
+            Some("unknown"),
+            "`in_progress` from the status update is not an outcome"
+        );
 
         let mut fresh = InteractionsParser::new(true);
         assert!(!fresh.awaiting_trailer(), "nothing seen yet");
-        fresh.push(STREAM.as_bytes());
+        fresh.push(SSE.as_bytes());
         assert!(!fresh.awaiting_trailer(), "the completion arrived");
     }
 
     #[test]
     fn errors_are_reported_and_nothing_is_none() {
+        let parsed = parse_all(
+            Box::new(InteractionsParser::new(false)),
+            BAD_MIME.as_bytes(),
+            16,
+        )
+        .unwrap();
+        assert!(
+            parsed
+                .in_stream_error
+                .as_deref()
+                .unwrap()
+                .starts_with("The value 'image/png' is not supported"),
+            "{:?}",
+            parsed.in_stream_error
+        );
+        assert_eq!(parsed.stop_reason, None);
+        // The documented streamed error event (not captured).
         let frame = "event: error\ndata: {\"error\":{\"message\":\"Deadline expired before operation could complete.\",\"code\":\"gateway_timeout\"},\"event_type\":\"error\"}\n\n";
         let parsed = parse_all(
             Box::new(InteractionsParser::new(true)),
@@ -360,20 +443,6 @@ event: done\ndata: [DONE]\n\n";
         assert_eq!(
             parsed.in_stream_error.as_deref(),
             Some("Deadline expired before operation could complete.")
-        );
-        assert_eq!(parsed.stop_reason, None);
-        let single = r#"{"error":{"message":"The value 'image/png' is not supported for 'response_format.mime_type'.","code":"invalid_request"}}"#;
-        let parsed = parse_all(
-            Box::new(InteractionsParser::new(false)),
-            single.as_bytes(),
-            16,
-        )
-        .unwrap();
-        assert!(
-            parsed
-                .in_stream_error
-                .unwrap()
-                .starts_with("The value 'image/png'")
         );
         assert!(parse_all(Box::new(InteractionsParser::new(false)), b"", 16).is_none());
         assert!(parse_all(Box::new(InteractionsParser::new(true)), b"\n\n", 16).is_none());

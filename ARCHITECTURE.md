@@ -252,10 +252,21 @@ before the answer (Google's prompt count rises on the final frame; the last fram
 `content` and no candidate count, since Google omits zero counts: the parser then takes `totalTokenCount`
 minus `promptTokenCount`. Fable 5.1 chose not to think on either prompt it was given, so its streams were
 plain and were not kept. There is no OpenAI capture: the OpenAI shapes are covered by the other four
-servers. The Interactions API (`POST /v1beta/interactions`, `parsers/interactions.rs`, the agent
-application's image route) has no capture either: its parser is tested on the structure of a live
-`gemini-3-pro-image` answer with the signature and image bytes cut short, and on Google's documented
-streaming sequence (`interaction.created`, `step.*`, `interaction.completed`, `done`).
+servers.
+
+`fixtures/gemini/interactions-*` were captured on 2026-10-25 through the scratch unified listener's `/gemini/`
+prefix with a throwaway key, for the Interactions API (`POST /v1beta/interactions`,
+`parsers/interactions.rs`, the agent application's image route): a plain and a streamed "Say hi." on
+`gemini-3.5-flash-lite`, a streamed `gemini-4-argon` answer with `thinking_level: high` and
+`thinking_summaries: auto`, a `gemini-3.5-flash-lite` run cut by `max_output_tokens: 64`, Google's
+`image/png` refusal, and a 512-pixel `gemini-3.1-flash-image` answer (534 KB, 747 image tokens inside
+1,123 output tokens). What they settled: `interaction.created` carries the model and no status,
+`interaction.status_update` says `in_progress`, and the counts arrive only on `interaction.completed`,
+whose `status` is the stop reason (`completed`, or `incomplete` when the output cap, which counts the
+thinking tokens, cut the answer); every answer opens with a `thought` step whose `thought_signature` delta
+is opaque, a `thought_summary` delta comes only when asked and from a model that writes one (3.5 Flash
+Lite at `low` sent the signature alone), an image answer's `thought` step has no content and its image
+part is `data` plus `mime_type`, and a refusal is `{"error":{"message","code"}}` with a string code.
 
 ## Known gaps
 

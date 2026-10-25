@@ -1,0 +1,1 @@
+{"error":{"message":"The value 'image/png' is not supported for 'response_format.mime_type'. Supported values: 'image/jpeg'.","code":"invalid_request"}}
