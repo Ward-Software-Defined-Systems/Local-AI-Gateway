@@ -630,6 +630,14 @@ type Events = EventSender;
 mod tests {
     use super::*;
 
+    /// The proxy listeners stamp `x-local-ai-gateway` with the version the proxy crate was built with; it
+    /// must be this binary's version, which the shared workspace version guarantees.
+    #[test]
+    fn the_proxy_listeners_stamp_this_binarys_version() {
+        assert_eq!(gateway_proxy::GATEWAY_VERSION, VERSION);
+        assert_eq!(gateway_proxy::GATEWAY_HEADER, "x-local-ai-gateway");
+    }
+
     #[test]
     fn the_dashboard_url_follows_tls_auth_and_bind_address() {
         let mut config = Config::default();

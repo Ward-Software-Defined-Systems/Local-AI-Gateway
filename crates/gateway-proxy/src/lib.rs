@@ -21,8 +21,8 @@ pub mod scan;
 pub mod tunnel;
 
 pub use listener::{
-    BackendUpstream, CapturePolicy, ListenerConfig, ListenerMode, ProxyContext, ProxyState,
-    TargetFlags, bind, serve,
+    BackendUpstream, CapturePolicy, GATEWAY_HEADER, GATEWAY_VERSION, ListenerConfig, ListenerMode,
+    ProxyContext, ProxyState, TargetFlags, bind, serve,
 };
 pub use scan::{Decision, NoopScanner, RequestScanner, ScanContext, ScanOutcome};
 

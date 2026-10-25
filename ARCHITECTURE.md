@@ -170,6 +170,10 @@ configuration, engine and pricing through `Hot`, so a reload is visible to the n
   listener only, the explicit `/anthropic/`-style prefix stripped from the path, `model` rewritten when an
   alias or a `provider/model` spelling resolved it, `/v1/…` → `/v1beta/openai/…` for OpenAI-format requests
   to Gemini, and `accept-encoding` removed from requests to cloud providers.
+- Every response from a proxy listener carries `x-local-ai-gateway: <version>`, set by a response layer in
+  `listener::serve` after the handler, so it covers proxied streams (the head only; the body bytes stand),
+  gateway-generated answers and refusals, and the 101 of a tunnel; a header of that name from an upstream
+  is replaced, never passed off as the gateway's. The dashboard listener has `/api/status` instead.
 - The gateway holds no provider keys. A client's credentials go only to the backend its request resolved
   to; a request whose headers belong to another provider is refused; a cloud provider's redirect is never
   followed.

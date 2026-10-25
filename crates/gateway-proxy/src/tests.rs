@@ -28,8 +28,8 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use crate::listener::{
-    BackendUpstream, CapturePolicy, ListenerConfig, ListenerMode, ProxyContext, TargetFlags, bind,
-    serve,
+    BackendUpstream, CapturePolicy, GATEWAY_HEADER, GATEWAY_VERSION, ListenerConfig, ListenerMode,
+    ProxyContext, TargetFlags, bind, serve,
 };
 use crate::scan::{Decision, RequestScanner, ScanContext, ScanOutcome};
 
@@ -677,6 +677,149 @@ async fn a_cloud_listener_redacts_the_key_query_and_passes_redirects_through() {
     );
     assert_eq!(record.status, Some(307));
     assert!(record.is_cloud);
+}
+
+/// Every value of the gateway's own response header, so a test sees a duplicate as well as a wrong value.
+fn gateway_header(resp: &reqwest::Response) -> Vec<String> {
+    resp.headers()
+        .get_all(GATEWAY_HEADER)
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect()
+}
+
+/// Every response from a proxy listener names the gateway and its version, so a client can check what it is
+/// talking to before it routes provider traffic through it. A fixed listener: a proxied stream (the header
+/// on the head, upstream's bytes in the body), a passthrough, a gateway refusal, and an upstream that
+/// claims the header itself.
+#[tokio::test]
+async fn every_response_from_a_fixed_listener_names_the_gateway_and_its_version() {
+    let mock = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(|| async {
+                (
+                    [
+                        (header::CONTENT_TYPE, "text/event-stream"),
+                        (header::HeaderName::from_static(GATEWAY_HEADER), "evil"),
+                    ],
+                    OPENAI_SSE,
+                )
+            }),
+        )
+        .route("/api/tags", get(|| async { r#"{"models":[]}"# }));
+    let mut proxy = spawn_proxy(mock, Options::default()).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/v1/chat/completions", proxy.url))
+        .body(r#"{"model":"m","messages":[],"stream":true}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        gateway_header(&resp),
+        vec![GATEWAY_VERSION],
+        "the upstream's claim is replaced, not appended to"
+    );
+    assert_eq!(
+        resp.text().await.unwrap(),
+        OPENAI_SSE,
+        "the body is untouched"
+    );
+    next_record(&mut proxy.events).await;
+
+    let resp = client
+        .get(format!("{}/api/tags", proxy.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gateway_header(&resp), vec![GATEWAY_VERSION], "passthrough");
+    next_record(&mut proxy.events).await;
+
+    let resp = client
+        .post(format!("{}/v1/chat/completions", proxy.url))
+        .body(vec![b'x'; 1024 * 1024 + 1])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        gateway_header(&resp),
+        vec![GATEWAY_VERSION],
+        "a 413 refusal"
+    );
+}
+
+/// The unified listener's gateway-generated answers carry it too: the merged model list, a DLP block and a
+/// format the provider lacks. None of these reaches an upstream.
+#[tokio::test]
+async fn gateway_generated_answers_on_the_unified_listener_name_the_gateway_too() {
+    let (anthropic_router, anthropic_seen) = recording_mock("anthropic");
+    let (ollama_router, _ollama_seen) = recording_mock("ollama");
+    let targets = BTreeMap::from([
+        (Backend::Anthropic, spawn_upstream(anthropic_router).await),
+        (Backend::Ollama, spawn_upstream(ollama_router).await),
+    ]);
+    let mut proxy = start_unified(
+        targets,
+        RoutingTable::default(),
+        Options {
+            scanner: Some(Arc::new(BlockAkia {
+                calls: AtomicUsize::new(0),
+            })),
+            ..Default::default()
+        },
+    );
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{}/v1/models", proxy.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        gateway_header(&resp),
+        vec![GATEWAY_VERSION],
+        "the merged list"
+    );
+    let list: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(list["object"], "list");
+
+    let resp = client
+        .post(format!("{}/v1/messages", proxy.url))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"model":"claude-opus-5-5","max_tokens":1,"messages":[{"role":"user","content":"AKIAIOSFODNN7EXAMPLE"}]}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(gateway_header(&resp), vec![GATEWAY_VERSION], "a DLP block");
+    let record = next_record(&mut proxy.events).await;
+    assert!(matches!(record.outcome, Outcome::Blocked { .. }));
+
+    let resp = client
+        .post(format!("{}/v1/embeddings", proxy.url))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"model":"claude-opus-5-5","input":"x"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        gateway_header(&resp),
+        vec![GATEWAY_VERSION],
+        "a format refusal"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "format_not_served", "{body}");
+    next_record(&mut proxy.events).await;
+    assert!(
+        anthropic_seen.lock().unwrap().is_empty(),
+        "nothing reached the provider"
+    );
 }
 
 /// An OpenAI chat completion as a provider's compat endpoint answers it: a million tokens each way so the
@@ -1763,6 +1906,11 @@ async fn websocket_upgrades_are_tunnelled_bidirectionally() {
         .expect("handshake through the proxy");
     assert_eq!(response.status().as_u16(), 101);
     assert!(response.headers().contains_key("x-request-id"));
+    assert_eq!(
+        response.headers().get(GATEWAY_HEADER).unwrap(),
+        GATEWAY_VERSION,
+        "the 101 of a tunnel names the gateway too"
+    );
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(
             "hello".into(),

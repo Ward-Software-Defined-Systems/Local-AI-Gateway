@@ -1,6 +1,8 @@
 //! One axum server per configured listen address. A fixed listener sends every request to one backend.
 //! `bind` claims the socket before the runtime exists so a taken port stops startup; `serve` runs the
-//! pipeline as a catch-all handler with graceful shutdown. `ProxyContext` is what every listener shares:
+//! pipeline as a catch-all handler with graceful shutdown, and stamps every response it sends with
+//! `x-local-ai-gateway: <version>` so a client can tell it is talking to the gateway. `ProxyContext` is
+//! what every listener shares:
 //! the upstream HTTP clients (one follows redirects for the local servers, one refuses them for the cloud
 //! providers so a credential never follows a redirect to another host), the store and event bus, the DLP
 //! scanner, the capture policy, pricing, the routing table, the backend snapshots and the in-flight table.
@@ -11,8 +13,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::Router;
+use axum::http::HeaderValue;
+use axum::response::Response;
 use axum::routing::any;
+use axum::{Router, middleware};
 use gateway_core::config::{BackendConfig, BackendsConfig, CaptureConfig, UnifiedConfig};
 use gateway_core::events::EventSender;
 use gateway_core::pricing::PricingTable;
@@ -27,6 +31,13 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::scan::{NoopScanner, RequestScanner};
+
+/// The response header that names the gateway, on every response a proxy listener sends.
+pub const GATEWAY_HEADER: &str = "x-local-ai-gateway";
+
+/// Its value: the gateway's version and nothing else. The crates share the workspace version, so this is
+/// the binary's `CARGO_PKG_VERSION`; a test in the binary pins the equality.
+pub const GATEWAY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Per-target behaviour, from the backend's `[backends.<name>]` table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,6 +338,16 @@ pub fn bind(addr: SocketAddr) -> Result<std::net::TcpListener> {
     Ok(listener)
 }
 
+/// Puts `x-local-ai-gateway: <version>` on a response head. It runs after the handler, so it covers proxied
+/// streams (the body bytes stand), gateway-generated answers and refusals, and the 101 of a tunnel; a
+/// header of that name from an upstream is replaced, never passed off as the gateway's.
+async fn stamp_gateway_header(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(GATEWAY_HEADER, HeaderValue::from_static(GATEWAY_VERSION));
+    response
+}
+
 /// Serves until `shutdown` flips, then waits for open connections (the caller bounds the wait).
 pub async fn serve(
     listener: std::net::TcpListener,
@@ -339,6 +360,7 @@ pub async fn serve(
     info!(listen = %addr, target = %config.summary(), "proxy listener ready");
     let app = Router::new()
         .fallback(any(crate::pipeline::handle))
+        .layer(middleware::map_response(stamp_gateway_header))
         .with_state(ProxyState {
             listener: config,
             ctx,
