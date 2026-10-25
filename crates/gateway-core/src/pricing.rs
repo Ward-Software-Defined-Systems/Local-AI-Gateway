@@ -267,6 +267,10 @@ mod tests {
             ("anthropic/claude-fable-5-1", "claude-fable-5-1"),
             ("gemini-3.1-pro-preview", "gemini-3-1-pro"),
             ("models/gemini-3.1-pro", "gemini-3-1-pro"),
+            // The image models have rows of their own, so they do not inherit the text model's price.
+            ("gemini-3.1-flash-image", "gemini-3-1-flash-image"),
+            ("models/gemini-2.5-flash-image", "gemini-2-5-flash-image"),
+            ("gemini-3-pro-image-preview", "gemini-3-pro-image"),
             ("gpt-5.5", "gpt-5-5"),
             ("openai/gpt-5.5-pro", "gpt-5-5-pro"),
             ("gpt-5-mini-2026-01-01", "gpt-5-mini"),

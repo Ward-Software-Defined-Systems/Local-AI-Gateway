@@ -216,7 +216,16 @@ tested on the documented shape), and `:embedContent` reports `usageMetadata.prom
 unknown-model refusals are 404s carrying the providers' ordinary error objects; Google answers an `alt=sse`
 request's error with a bare JSON object under `text/event-stream`, which the error branch parses like any
 other body. The Gemini parser (`parsers/gemini.rs`) reads SSE frames with `alt=sse`, one object, or a JSON
-array parsed when complete. There is no OpenAI capture: the OpenAI shapes are covered by the other four
+array parsed when complete. A second set the same day covered the shapes that depend on the model: Opus 5.5
+reasoning on a puzzle (the thinking block is one empty `thinking_delta` plus a `signature_delta` by
+default, the summary text with `display: summarized`; `output_tokens` already counts the thinking), a Haiku
+pair with a 15k-token cached system prompt (`cache_creation_input_tokens`, then `cache_read_input_tokens`,
+both part of the prompt count), `gemini-4-argon` at `thinkingLevel: high` returning a part marked `thought`
+before the answer (Google's prompt count rises on the final frame; the last frame wins), and
+`gemini-3-pro-image` declining a prompt on recitation grounds with a 200 whose candidate has an empty
+`content` and no candidate count, since Google omits zero counts: the parser then takes `totalTokenCount`
+minus `promptTokenCount`. Fable 5.1 chose not to think on either prompt it was given, so its streams were
+plain and were not kept. There is no OpenAI capture: the OpenAI shapes are covered by the other four
 servers.
 
 ## Known gaps

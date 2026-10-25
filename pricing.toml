@@ -132,6 +132,29 @@ output_per_mtok_usd = 2.50
 input_per_mtok_usd  = 0.10
 output_per_mtok_usd = 0.40
 
+# Image models bill their images as output tokens at a rate of their own (text output is cheaper); the rows
+# carry the image rate, so an image answer is priced right and a text answer from them is an upper bound.
+# Without them the `-image` ids would inherit the text model's price through the prefix match.
+[providers.google.models.gemini-3-pro-image]
+input_per_mtok_usd  = 2.00
+output_per_mtok_usd = 120.00
+
+[providers.google.models.gemini-3-1-flash-image]
+input_per_mtok_usd  = 0.50
+output_per_mtok_usd = 60.00
+
+[providers.google.models.gemini-3-1-flash-lite-image]
+input_per_mtok_usd  = 0.25
+output_per_mtok_usd = 30.00
+
+[providers.google.models.gemini-2-5-flash-image]
+input_per_mtok_usd  = 0.30
+output_per_mtok_usd = 30.00
+
+[providers.google.models.gemini-nano-banana-2-1]
+input_per_mtok_usd  = 1.50
+output_per_mtok_usd = 30.00
+
 [providers.google.models.gemini-embedding-2]
 input_per_mtok_usd  = 0.20
 output_per_mtok_usd = 0.00

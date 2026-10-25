@@ -1,0 +1,69 @@
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-opus-5-5","id":"msg_011CgNDGZUN5JzNyv88LxY9g","type":"message","role":"assistant","content":[],"container":null,"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":70,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens":8,"service_tier":"standard","inference_geo":"global","speed":"standard"},"diagnostics":null}              }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}         }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Combining m"}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"od 3 and mod "}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"7 gives x ≡"}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" 2 mod 21"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":", so"} }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" candidates are 2, "}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"23, 44, 65..."}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" Checking against"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" mod 5 "}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"= 3,"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" I"}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" find 23 works."}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\n"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"CAQS1AUKEAgTGAI4AUIIdGhpbmtpbmcSDMnmQqssMIATZx/sHRoMv5evwfoQQ40mFcoFIjClLH6r8G8cpUSt64vRzvon3ibL2hFV8ae0d4WwZGYDuYzHixPsBYOA7iJNFznEb7sq8QTpp13grbKD8H6AhJpwJ1nN432HkfqrmpsKbaRYFQddQnwpYVLzFntng1/X+D8FpJCUpCORFeCk9MweKnW8n907w//twBK5VLqZWcsmMtGlaRsZACDEROOrZgPVEtUBOd45eHqosIxBqJIZENPImJ1l9KSrvf2ZPamCpTPLvpp3WDPMN0lX9P2l21hq3P3fqaaE4KY3E7ul7wgX9Xc1ZYOnusTqC5SNxBTz4lg72AnzqTMDWCGMmBYHOfw74OK9tRXvUHCR0Kq8dEVr00671JIXSkmTt5kX/W4oK3K+onkpT4acLTn+2fC5jQeH0pckKnGuqE5u2HRlHnOwFU3XBSSgoDS7SvHBpL6as12CMhFqNVc23hcJIp+nSnPaLnh9uxXGsxqgiOtvSoknrgkxGrRzYMYiQzNGoe0SDbTb4cJOF+JcNzxf6WlTRdnj+EKuTGt/f7M7lLBQYsRGEx0xVfBkV4mW0LwWhdT3F1/XSXsQgsRlb5beBo/2OhqR691nDiAeLYFtN9te+j0nfkjf2l/gL6kMcBr9vFmBnvqDHPgYkVcZ0HDXUlR0EAA4I8S377hXPh2+kTdK8tRTvQDorjlmrL5htiWm3BWiw4qwOjPaJoWJNmUlUPyQkv08b+rYQZ6Yx1tj4W277axfPr1uorPCwWdegV7PM7Mh9eFgKDQGKiAk4ZDbKtkJ0qCaqdGULuyfIpQTumCyGBmy2/QbyLrxpV12Unz7fLMtnaBzG9LveBczseoFhnAT+J1uXZch5bFNNHzeWMFmHx1aw1886fUXc4LYBVf3nL9+q71/4OlV1yNnEG82VkewU5vNSMboQhTGGAE="}           }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0  }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}      }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"23"}             }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1 }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null,"container":null},"usage":{"input_tokens":70,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":90,"output_tokens_details":{"thinking_tokens":87}} }
+
+event: message_stop
+data: {"type":"message_stop"           }
+

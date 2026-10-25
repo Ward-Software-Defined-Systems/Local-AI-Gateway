@@ -59,13 +59,20 @@ struct Usage {
     prompt_token_count: Option<u64>,
     candidates_token_count: Option<u64>,
     thoughts_token_count: Option<u64>,
+    total_token_count: Option<u64>,
 }
 
 impl Usage {
     /// Everything the model generated: the reply and its reasoning, the way the other APIs count output.
+    /// Google leaves a zero count out of the JSON, so an answer with no candidate tokens (an image model
+    /// refusing on recitation grounds, `fixtures/gemini`) shows only the prompt and total counts; their
+    /// difference is then the exact output count rather than an estimate.
     fn generated(&self) -> Option<u64> {
         match (self.candidates_token_count, self.thoughts_token_count) {
-            (None, None) => None,
+            (None, None) => match (self.total_token_count, self.prompt_token_count) {
+                (Some(total), Some(prompt)) => Some(total.saturating_sub(prompt)),
+                _ => None,
+            },
             (c, t) => Some(c.unwrap_or(0) + t.unwrap_or(0)),
         }
     }
@@ -223,6 +230,8 @@ mod tests {
     const SINGLE: &[u8] =
         include_bytes!("../../../../fixtures/gemini/generatecontent-nonstream.json");
     const NOT_FOUND: &[u8] = include_bytes!("../../../../fixtures/gemini/404-bad-model.json");
+    const RECITATION: &[u8] =
+        include_bytes!("../../../../fixtures/gemini/generatecontent-image-recitation.json");
 
     /// `gemini-3.5-flash-lite` answering "Say hi." over `?alt=sse`: two CRLF-framed chunks, cumulative
     /// usage on both, the finish reason on the last one beside an empty text part that carries only a
@@ -295,15 +304,34 @@ mod tests {
         );
     }
 
-    /// A part marked `thought` (the documented shape when the model returns a reasoning summary; no
-    /// capture shows one) is reply text like the other parsers' reasoning.
+    /// `gemini-4-argon` at `thinkingLevel: high` with `includeThoughts`: the first frame is a part marked
+    /// `thought` holding the reasoning summary, the answer follows, and the last frame carries only a
+    /// signature. Every frame's usage is cumulative and the last one wins, prompt count included (Google
+    /// raises it on the final frame).
     #[test]
-    fn thought_parts_are_reply_text() {
-        let frame = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Let me think.\",\"thought\":true},{\"text\":\"Hello\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":1,\"thoughtsTokenCount\":5,\"totalTokenCount\":13}}\r\n\r\n";
-        let parsed = parse_all(Box::new(GeminiParser::new(Mode::Sse)), frame, 64).unwrap();
-        assert_eq!(parsed.text, "Let me think.Hello");
-        assert_eq!(parsed.gen_tokens, Some(6));
-        assert_eq!(parsed.stop_reason.as_deref(), Some("STOP"));
+    fn fixture_thought_parts_are_reply_text() {
+        const THOUGHTS: &[u8] = include_bytes!(
+            "../../../../fixtures/gemini/streamgeneratecontent-sse-thought-parts.txt"
+        );
+        for chunk in [1, 13, 4096] {
+            let parsed =
+                parse_all(Box::new(GeminiParser::new(Mode::Sse)), THOUGHTS, chunk).unwrap();
+            assert_eq!(parsed.model.as_deref(), Some("gemini-4-argon"));
+            assert_eq!(parsed.prompt_tokens, Some(73));
+            assert_eq!(
+                parsed.gen_tokens,
+                Some(462),
+                "6 candidate tokens plus 456 thought tokens"
+            );
+            assert!(!parsed.tokens_estimated);
+            assert_eq!(parsed.stop_reason.as_deref(), Some("STOP"));
+            assert!(
+                parsed.text.starts_with("**Solving the Congruences**\n\n"),
+                "{}",
+                parsed.text
+            );
+            assert!(parsed.text.ends_with("in mind.\n\n\n23"), "{}", parsed.text);
+        }
     }
 
     #[test]
@@ -339,6 +367,28 @@ mod tests {
         );
         parser.push(b"data: {\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1}}\r\n\r\n");
         assert!(!parser.awaiting_trailer());
+    }
+
+    /// `gemini-3-pro-image` declining to show an image (`IMAGE_RECITATION`): a 200 whose candidate has an
+    /// empty `content`, a `finishMessage`, and a usage with no candidate count because it is zero.
+    #[test]
+    fn fixture_an_empty_candidate_has_an_exact_zero_output_count() {
+        let parsed = parse_all(Box::new(GeminiParser::new(Mode::Single)), RECITATION, 64).unwrap();
+        assert_eq!(parsed.model.as_deref(), Some("gemini-3-pro-image"));
+        assert_eq!(
+            (parsed.prompt_tokens, parsed.gen_tokens),
+            (Some(15), Some(0))
+        );
+        assert!(
+            !parsed.tokens_estimated,
+            "total minus prompt, not a chunk count"
+        );
+        assert_eq!(parsed.stop_reason.as_deref(), Some("IMAGE_RECITATION"));
+        assert!(parsed.text.is_empty());
+        assert_eq!(
+            parsed.in_stream_error, None,
+            "a refusal is a finish reason, not an error"
+        );
     }
 
     /// Google refuses an unknown model with a 404 whose body is the same error object a 200 stream would

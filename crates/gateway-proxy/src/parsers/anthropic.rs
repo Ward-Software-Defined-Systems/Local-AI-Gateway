@@ -368,6 +368,60 @@ mod tests {
         assert_eq!(single.ttft_ms, None);
     }
 
+    /// Opus 5.5 reasoning before it answers: with the default display the thinking block is one empty
+    /// `thinking_delta` and a `signature_delta`, with `display: summarized` it carries the summary text,
+    /// which is reply text here like every other parser's reasoning. `output_tokens` already includes the
+    /// thinking tokens.
+    #[test]
+    fn fixture_anthropic_thinking_blocks_are_reply_text_and_counted_once() {
+        const OMITTED: &[u8] =
+            include_bytes!("../../../../fixtures/anthropic/v1-messages-sse-thinking.txt");
+        const SUMMARIZED: &[u8] = include_bytes!(
+            "../../../../fixtures/anthropic/v1-messages-sse-thinking-summarized.txt"
+        );
+        for chunk in [1, 7, 4096] {
+            let s = parse_all(Box::new(AnthropicParser::new(true)), OMITTED, chunk).unwrap();
+            assert_eq!(s.model.as_deref(), Some("claude-opus-5-5"));
+            assert_eq!((s.prompt_tokens, s.gen_tokens), (Some(70), Some(98)));
+            assert_eq!(s.stop_reason.as_deref(), Some("end_turn"));
+            assert_eq!(s.text, "23", "an omitted thinking block adds no text");
+            let s = parse_all(Box::new(AnthropicParser::new(true)), SUMMARIZED, chunk).unwrap();
+            assert_eq!((s.prompt_tokens, s.gen_tokens), (Some(70), Some(90)));
+            assert!(
+                s.text
+                    .starts_with("Combining mod 3 and mod 7 gives x ≡ 2 mod 21"),
+                "{}",
+                s.text
+            );
+            assert!(s.text.ends_with("I find 23 works.\n\n23"), "{}", s.text);
+            assert_eq!(s.text.chars().count(), 129);
+        }
+    }
+
+    /// Haiku with a 15k-token cached system prompt: the first call creates the cache, the second reads it;
+    /// the prompt size is `input_tokens` plus whichever cache count is set.
+    #[test]
+    fn fixture_anthropic_cache_counts_join_the_prompt() {
+        const CREATION: &[u8] =
+            include_bytes!("../../../../fixtures/anthropic/v1-messages-cache-creation.json");
+        const READ: &[u8] =
+            include_bytes!("../../../../fixtures/anthropic/v1-messages-cache-read.json");
+        let creation = parse_all(Box::new(AnthropicParser::new(false)), CREATION, 64).unwrap();
+        assert_eq!(
+            (creation.prompt_tokens, creation.gen_tokens),
+            (Some(15506), Some(14)),
+            "11 input plus 15495 written to the cache"
+        );
+        assert_eq!(creation.text, "Hi there! How can I help you today?");
+        let read = parse_all(Box::new(AnthropicParser::new(false)), READ, 64).unwrap();
+        assert_eq!(
+            (read.prompt_tokens, read.gen_tokens),
+            (Some(15506), Some(6)),
+            "11 input plus 15495 read from the cache"
+        );
+        assert_eq!(read.stop_reason.as_deref(), Some("end_turn"));
+    }
+
     #[test]
     fn fixture_lmstudio_messages_stream_and_single() {
         for chunk in [7, 77, 4096] {
