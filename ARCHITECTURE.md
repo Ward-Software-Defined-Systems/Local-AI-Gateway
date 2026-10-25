@@ -252,7 +252,10 @@ before the answer (Google's prompt count rises on the final frame; the last fram
 `content` and no candidate count, since Google omits zero counts: the parser then takes `totalTokenCount`
 minus `promptTokenCount`. Fable 5.1 chose not to think on either prompt it was given, so its streams were
 plain and were not kept. There is no OpenAI capture: the OpenAI shapes are covered by the other four
-servers.
+servers. The Interactions API (`POST /v1beta/interactions`, `parsers/interactions.rs`, the agent
+application's image route) has no capture either: its parser is tested on the structure of a live
+`gemini-3-pro-image` answer with the signature and image bytes cut short, and on Google's documented
+streaming sequence (`interaction.created`, `step.*`, `interaction.completed`, `done`).
 
 ## Known gaps
 

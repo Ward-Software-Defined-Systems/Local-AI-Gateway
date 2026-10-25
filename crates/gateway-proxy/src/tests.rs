@@ -760,6 +760,108 @@ async fn a_tls_listener_serves_https_under_the_gateway_ca() {
     );
 }
 
+/// An Interactions API answer to an image request, in the structure Google returns (signature and image
+/// bytes cut short), with round token counts so the list-price cost is exact.
+const INTERACTION_JSON: &str = r#"{"id":"v1_abc","status":"completed","usage":{"total_tokens":1000000,"total_input_tokens":500000,"input_tokens_by_modality":[{"modality":"text","tokens":500000}],"total_cached_tokens":0,"total_output_tokens":400000,"output_tokens_by_modality":[{"modality":"image","tokens":400000}],"total_tool_use_tokens":0,"total_thought_tokens":100000},"created":"2026-10-25T19:17:09Z","updated":"2026-10-25T19:17:09Z","service_tier":"standard","steps":[{"signature":"c2ln","type":"thought"},{"content":[{"data":"/9j/4AAQ","mime_type":"image/jpeg","type":"image"}],"type":"model_output"}],"object":"interaction","model":"gemini-3-pro-image"}"#;
+
+/// Google's documented streaming sequence for a text interaction.
+const INTERACTION_SSE: &str = "event: interaction.created\ndata: {\"interaction\":{\"id\":\"v1_abc\",\"model\":\"gemini-3.5-flash-lite\",\"status\":\"in_progress\"},\"event_type\":\"interaction.created\"}\n\n\
+event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"model_output\"},\"event_type\":\"step.start\"}\n\n\
+event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text\",\"text\":\"Hi there!\"},\"event_type\":\"step.delta\"}\n\n\
+event: step.stop\ndata: {\"index\":0,\"event_type\":\"step.stop\"}\n\n\
+event: interaction.completed\ndata: {\"interaction\":{\"id\":\"v1_abc\",\"status\":\"completed\",\"usage\":{\"total_tokens\":19,\"total_input_tokens\":7,\"total_output_tokens\":12},\"object\":\"interaction\",\"model\":\"gemini-3.5-flash-lite\"},\"event_type\":\"interaction.completed\"}\n\n\
+event: done\ndata: [DONE]\n\n";
+
+/// `POST /v1beta/interactions` is inference, not cloud passthrough: an image answer is parsed, counted
+/// (output plus thoughts) and priced at the image model's list rate; a stream through the unified listener's
+/// `/gemini/` prefix is parsed from its events.
+#[tokio::test]
+async fn interactions_are_parsed_counted_and_priced_like_inference() {
+    let mock = Router::new().route(
+        "/v1beta/interactions",
+        post(|body: String| async move {
+            if body.contains("\"stream\":true") {
+                (
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    INTERACTION_SSE,
+                )
+            } else {
+                (
+                    [(header::CONTENT_TYPE, "application/json")],
+                    INTERACTION_JSON,
+                )
+            }
+        }),
+    );
+    let upstream = spawn_upstream(mock).await;
+    let mut fixed = start_proxy(
+        upstream.clone(),
+        Options {
+            backend: Backend::Gemini,
+            ..Default::default()
+        },
+    );
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1beta/interactions", fixed.url))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"model":"gemini-3-pro-image","input":[{"type":"text","text":"a lighthouse"}],"response_format":{"type":"image","mime_type":"image/jpeg"}}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        resp.text().await.unwrap(),
+        INTERACTION_JSON,
+        "bytes untouched"
+    );
+    let record = next_record(&mut fixed.events).await;
+    assert_eq!(record.api_format, ApiFormat::GeminiInteractions);
+    assert_eq!(record.backend, Backend::Gemini);
+    assert!(record.is_cloud);
+    assert!(!record.streamed);
+    assert_eq!(
+        record.model_requested.as_deref(),
+        Some("gemini-3-pro-image")
+    );
+    assert_eq!(record.model_resolved.as_deref(), Some("gemini-3-pro-image"));
+    assert_eq!(record.prompt_tokens, Some(500_000));
+    assert_eq!(record.gen_tokens, Some(500_000), "output plus thoughts");
+    assert!(!record.tokens_estimated);
+    assert_eq!(record.stop_reason.as_deref(), Some("completed"));
+    assert_eq!(record.outcome, Outcome::Completed);
+    assert_eq!(
+        record.actual_cost_usd,
+        Some(61.0),
+        "0.5M input at 2 USD and 0.5M output at the 120 USD image rate"
+    );
+    assert!(record.hypothetical_cost.is_empty());
+
+    let targets = BTreeMap::from([(Backend::Gemini, upstream)]);
+    let mut unified = start_unified(targets, RoutingTable::default(), Options::default());
+    let resp = client
+        .post(format!("{}/gemini/v1beta/interactions", unified.url))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"model":"gemini-3.5-flash-lite","input":[{"type":"text","text":"Say hi."}],"stream":true}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.text().await.unwrap(), INTERACTION_SSE);
+    let record = next_record(&mut unified.events).await;
+    assert_eq!(record.api_format, ApiFormat::GeminiInteractions);
+    assert_eq!(record.routed_by.as_deref(), Some("prefix"));
+    assert!(record.streamed);
+    assert_eq!(record.prompt_tokens, Some(7));
+    assert_eq!(record.gen_tokens, Some(12));
+    assert_eq!(record.stop_reason.as_deref(), Some("completed"));
+    assert!(record.ttft_ms.is_some());
+    assert!(
+        record.actual_cost_usd.is_some(),
+        "priced at the model's row"
+    );
+}
+
 /// Every value of the gateway's own response header, so a test sees a duplicate as well as a wrong value.
 fn gateway_header(resp: &reqwest::Response) -> Vec<String> {
     resp.headers()

@@ -88,6 +88,13 @@ function deltaText(json: unknown, format: ApiFormat): string | null {
         .filter((t): t is string => typeof t === 'string')
       return parts.length ? parts.join('') : null
     }
+    case 'gemini_interactions': {
+      if (obj.event_type !== 'step.delta') return null
+      const delta = obj.delta as { type?: string; text?: string; content?: { text?: unknown } } | undefined
+      if (delta?.type === 'text' && typeof delta.text === 'string') return delta.text
+      if (delta?.type === 'thought_summary' && typeof delta.content?.text === 'string') return delta.content.text
+      return null
+    }
     default: {
       const choices = obj.choices as { delta?: { content?: string }; text?: string; message?: { content?: string } }[] | undefined
       if (!Array.isArray(choices)) return null

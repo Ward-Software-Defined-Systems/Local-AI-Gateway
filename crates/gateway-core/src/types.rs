@@ -337,6 +337,10 @@ pub enum ApiFormat {
     /// Gemini `:embedContent` and `:batchEmbedContents`.
     #[serde(rename = "gemini_embed")]
     GeminiEmbed,
+    /// Google's Interactions API, `POST /v1beta/interactions`: text and image generation as one JSON object
+    /// or an SSE stream of events.
+    #[serde(rename = "gemini_interactions")]
+    GeminiInteractions,
     /// Everything else, recorded as metadata only.
     #[serde(rename = "passthrough")]
     Passthrough,
@@ -348,7 +352,7 @@ pub enum ApiFormat {
 }
 
 impl ApiFormat {
-    pub const ALL: [ApiFormat; 13] = [
+    pub const ALL: [ApiFormat; 14] = [
         ApiFormat::OllamaNative,
         ApiFormat::OllamaEmbeddings,
         ApiFormat::OpenAiChat,
@@ -360,6 +364,7 @@ impl ApiFormat {
         ApiFormat::LmStudioEmbeddings,
         ApiFormat::GeminiGenerate,
         ApiFormat::GeminiEmbed,
+        ApiFormat::GeminiInteractions,
         ApiFormat::Passthrough,
         ApiFormat::CloudPassthrough,
     ];
@@ -377,6 +382,7 @@ impl ApiFormat {
             ApiFormat::LmStudioEmbeddings => "lmstudio_embeddings",
             ApiFormat::GeminiGenerate => "gemini_generate",
             ApiFormat::GeminiEmbed => "gemini_embed",
+            ApiFormat::GeminiInteractions => "gemini_interactions",
             ApiFormat::Passthrough => "passthrough",
             ApiFormat::CloudPassthrough => "cloud_passthrough",
         }
@@ -893,6 +899,8 @@ mod request_tests {
             assert_eq!(json, format!("\"{}\"", format.as_str()));
         }
         assert!(ApiFormat::OpenAiChat.is_inference());
+        assert!(ApiFormat::GeminiInteractions.is_inference());
+        assert!(!ApiFormat::GeminiInteractions.is_embeddings());
         assert!(!ApiFormat::Passthrough.is_inference());
         assert!(ApiFormat::OllamaEmbeddings.is_embeddings());
         assert!(ApiFormat::OllamaNative.has_engine_timings());

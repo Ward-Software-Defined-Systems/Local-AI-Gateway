@@ -11,6 +11,7 @@
 pub mod anthropic;
 pub mod embeddings;
 pub mod gemini;
+pub mod interactions;
 pub mod line_buffer;
 pub mod ollama;
 pub mod openai;
@@ -192,6 +193,7 @@ pub fn select(
         ApiFormat::GeminiEmbed => Box::new(embeddings::EmbeddingsParser::new(
             embeddings::Flavor::Gemini,
         )),
+        ApiFormat::GeminiInteractions => Box::new(interactions::InteractionsParser::new(streamed)),
     })
 }
 

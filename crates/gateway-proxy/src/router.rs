@@ -79,6 +79,8 @@ pub fn classify(backend: Backend, method: &Method, path: &str) -> ApiFormat {
                 "/api/v0/embeddings" => ApiFormat::LmStudioEmbeddings,
                 _ => ApiFormat::Passthrough,
             },
+            // The Interactions API is a fixed path; the model is in the body.
+            Backend::Gemini if path == "/v1beta/interactions" => ApiFormat::GeminiInteractions,
             Backend::Gemini => match gemini_call(path) {
                 Some(call) => match call.method.as_str() {
                     "generateContent" | "streamGenerateContent" => ApiFormat::GeminiGenerate,
@@ -253,6 +255,9 @@ mod tests {
                 ApiFormat::Passthrough,
             ),
             ("/v1beta/cachedContents", ApiFormat::Passthrough),
+            ("/v1beta/interactions", ApiFormat::GeminiInteractions),
+            ("/v1beta/interactions/", ApiFormat::GeminiInteractions),
+            ("/v1beta/interactions/v1_abc", ApiFormat::Passthrough),
             ("/v1beta/openai/chat/completions", ApiFormat::OpenAiChat),
             ("/v1beta/openai/embeddings", ApiFormat::OpenAiEmbeddings),
             ("/v1/chat/completions", ApiFormat::OpenAiChat),

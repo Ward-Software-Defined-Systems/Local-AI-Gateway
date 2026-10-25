@@ -217,6 +217,7 @@ pub fn compatible(format: ApiFormat, backend: Backend) -> bool {
             format,
             GeminiGenerate
                 | GeminiEmbed
+                | GeminiInteractions
                 | OpenAiChat
                 | OpenAiEmbeddings
                 | Passthrough
@@ -524,6 +525,9 @@ mod tests {
         assert!(!compatible(OpenAiResponses, Backend::Anthropic));
         assert!(!compatible(GeminiGenerate, Backend::Anthropic));
         assert!(compatible(GeminiGenerate, Backend::Gemini));
+        assert!(compatible(GeminiInteractions, Backend::Gemini));
+        assert!(!compatible(GeminiInteractions, Backend::Anthropic));
+        assert!(!compatible(GeminiInteractions, Backend::OpenAi));
         assert!(compatible(OpenAiEmbeddings, Backend::Gemini));
         assert!(!compatible(AnthropicMessages, Backend::Gemini));
         assert!(!compatible(OpenAiResponses, Backend::Gemini));

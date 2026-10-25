@@ -260,6 +260,8 @@ pub fn error_body(
         ApiFormat::GeminiGenerate | ApiFormat::GeminiEmbed => json!({
             "error": {"code": status.as_u16(), "message": message, "status": google_status(status)}
         }),
+        // The Interactions API's own errors are `{"error":{"message","code"}}` with a string code.
+        ApiFormat::GeminiInteractions => json!({"error": {"message": message, "code": code}}),
         ApiFormat::Passthrough | ApiFormat::CloudPassthrough => {
             return (
                 HeaderValue::from_static("text/plain; charset=utf-8"),

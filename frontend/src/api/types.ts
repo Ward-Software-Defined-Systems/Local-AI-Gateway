@@ -16,6 +16,7 @@ export type ApiFormat =
   | 'lmstudio_embeddings'
   | 'gemini_generate'
   | 'gemini_embed'
+  | 'gemini_interactions'
   | 'passthrough'
   | 'cloud_passthrough'
 export type RequestKind = 'http' | 'upgrade' | 'load'
@@ -408,6 +409,7 @@ export const API_FORMATS: ApiFormat[] = [
   'lmstudio_embeddings',
   'gemini_generate',
   'gemini_embed',
+  'gemini_interactions',
   'passthrough',
   'cloud_passthrough',
 ]
