@@ -1,6 +1,6 @@
 import { Link } from 'react-router'
 import { BACKEND_NAMES, type RequestSummary } from '../../api/types'
-import { formatBytes, formatSeconds, formatTime, truncate } from '../../lib/format'
+import { formatBytes, formatInt, formatSeconds, formatTime, truncate } from '../../lib/format'
 
 function outcomeBadge(r: RequestSummary): { text: string; cls: string } {
   const o = r.outcome
@@ -30,7 +30,8 @@ export default function RequestsTable({ rows, selected }: { rows: RequestSummary
           <th className="pb-1 pr-3 font-normal">model</th>
           <th className="pb-1 pr-3 font-normal">client</th>
           <th className="pb-1 pr-3 font-normal">outcome</th>
-          <th className="pb-1 pr-3 text-right font-normal">tokens</th>
+          <th className="pb-1 pr-3 text-right font-normal">prompt</th>
+          <th className="pb-1 pr-3 text-right font-normal">gen</th>
           <th className="pb-1 pr-3 text-right font-normal">time</th>
           <th className="pb-1 pr-3 text-right font-normal">bytes</th>
           <th className="pb-1 font-normal" />
@@ -40,6 +41,7 @@ export default function RequestsTable({ rows, selected }: { rows: RequestSummary
         {rows.map((r) => {
           const badge = outcomeBadge(r)
           const model = r.model_resolved ?? r.model_requested
+          const tok = r.tokens_estimated ? '~' : ''
           return (
             <tr key={r.id} className={`border-t border-zinc-800/60 ${selected === r.id ? 'bg-zinc-800/60' : 'hover:bg-zinc-800/30'}`}>
               <td className="py-1 pr-3 whitespace-nowrap tabular-nums">
@@ -63,8 +65,11 @@ export default function RequestsTable({ rows, selected }: { rows: RequestSummary
               <td className={`py-1 pr-3 whitespace-nowrap ${badge.cls}`} title={r.error_summary ?? undefined}>
                 {badge.text}
               </td>
-              <td className="py-1 pr-3 text-right tabular-nums text-zinc-300">
-                {r.prompt_tokens === null && r.gen_tokens === null ? '-' : `${r.tokens_estimated ? '~' : ''}${r.prompt_tokens ?? '?'}+${r.gen_tokens ?? '?'}`}
+              <td className="py-1 pr-3 text-right tabular-nums text-zinc-300" title={r.tokens_estimated ? 'estimated: the server sent no usage' : undefined}>
+                {r.prompt_tokens === null ? <span className="text-zinc-600">-</span> : `${tok}${formatInt(r.prompt_tokens)}`}
+              </td>
+              <td className="py-1 pr-3 text-right tabular-nums text-zinc-300" title={r.tokens_estimated ? 'estimated: the server sent no usage' : undefined}>
+                {r.gen_tokens === null ? <span className="text-zinc-600">-</span> : `${tok}${formatInt(r.gen_tokens)}`}
               </td>
               <td className="py-1 pr-3 text-right tabular-nums text-zinc-300">{formatSeconds(r.total_ms)}</td>
               <td className="py-1 pr-3 text-right tabular-nums text-zinc-400">{formatBytes(r.request_bytes + r.response_bytes)}</td>
