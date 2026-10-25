@@ -159,7 +159,8 @@ pub async fn api_spend(
         .run(move |c| read::cloud_spend(c, from, to))
         .await
         .map_err(ApiError::internal)?;
-    let total_usd = rows.iter().map(|r| r.spend_usd).sum();
+    // `f64::sum` starts from -0.0, which an empty table would show as "-0.0".
+    let total_usd = rows.iter().map(|r| r.spend_usd).fold(0.0, |a, b| a + b);
     ok(Spend {
         from,
         to,
